@@ -208,7 +208,9 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             if (baseRate < 12000) {
                 [self complete:nil error:LVError(32, @"This duration cannot retain audio/video within the safe upload budget.")]; return;
             }
-            BOOL preferHEVC = VTIsHardwareEncodeSupported(kCMVideoCodecType_HEVC);
+            // iOS has no public VTIsHardwareEncodeSupported API. Probe with writer settings/start;
+            // any unsupported HEVC encoder retries the identical full-duration job as H.264.
+            BOOL preferHEVC = YES;
             for (NSUInteger attempt = 0; attempt < 4; attempt++) {
                 if (self.isCancelled) { [self complete:nil error:nil]; return; }
                 NSInteger rate = MAX(12000, (NSInteger)(baseRate * pow(.72, (double)attempt)));
