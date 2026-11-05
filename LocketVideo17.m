@@ -11,8 +11,6 @@
 #import <math.h>
 
 // No networking, entitlements, UIKit, or upload hooks. iOS 15+, arm64.
-static const int64_t LVMaximumBytes = 9200000;
-static const int64_t LVTargetBytes = 8800000;
 static char LVJobKey, LVInternalKey;
 static __thread unsigned LVOriginalDepth;
 static dispatch_queue_t LVLogQueue;
@@ -62,6 +60,30 @@ static int64_t LVSize(NSURL *url) {
     // A reused NSURL may cache resource values across retries; always inspect the current file.
     if (!path || stat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) return -1;
     return (int64_t)info.st_size;
+}
+static NSInteger LVSourceChannels(AVAssetTrack *track) {
+    for (id format in track.formatDescriptions) {
+        const AudioStreamBasicDescription *asbd =
+            CMAudioFormatDescriptionGetStreamBasicDescription((__bridge CMAudioFormatDescriptionRef)format);
+        if (asbd && asbd->mChannelsPerFrame > 0) return MIN(2, (NSInteger)asbd->mChannelsPerFrame);
+    }
+    return 2;
+}
+// Quality target for the rare render-only path. Prefer the source track's own bitrate;
+// use a resolution-based estimate when the container does not advertise one.
+static NSInteger LVSourceVideoRate(AVAsset *asset) {
+    double rate = 0;
+    AVAssetTrack *track = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
+    if (track) {
+        rate = track.estimatedDataRate;
+        if (!isfinite(rate) || rate <= 0) {
+            CGRect b = CGRectApplyAffineTransform((CGRect){CGPointZero, track.naturalSize}, track.preferredTransform);
+            CGFloat edge = fmax(fabs(b.size.width), fabs(b.size.height));
+            rate = edge >= 1920 ? 6000000 : (edge >= 1280 ? 3000000 : (edge >= 720 ? 1500000 : 800000));
+        }
+    }
+    if (!isfinite(rate) || rate <= 0) rate = 3000000;
+    return (NSInteger)fmin(12000000.0, fmax(500000.0, rate));
 }
 static NSString *LVOutputType(AVAssetExportSession *s) {
     NSString *ext = s.outputURL.pathExtension.lowercaseString;
@@ -142,8 +164,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
 }
 - (BOOL)validate:(NSURL *)url error:(NSError **)error {
     int64_t bytes = LVSize(url);
-    if (bytes <= 0 || bytes > LVMaximumBytes) {
-        if (error) *error = LVError(30, @"Full-length video exceeds the safe byte budget.");
+    if (bytes <= 0) {
+        if (error) *error = LVError(30, @"Exported file is missing or is not a regular file.");
         return NO;
     }
     AVURLAsset *result = [AVURLAsset URLAssetWithURL:url options:@{AVURLAssetPreferPreciseDurationAndTimingKey:@YES}];
@@ -164,7 +186,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     NSURL *url = ((AVURLAsset *)_asset).URL;
     if (!url.isFileURL || [url isEqual:_outputURL]) return NO;
     int64_t size = LVSize(url);
-    if (size <= 0 || size > LVMaximumBytes) return NO;
+    if (size <= 0) return NO;
     NSFileHandle *h = [NSFileHandle fileHandleForReadingFromURL:url error:NULL];
     NSData *head = [h readDataOfLength:12];
     [h closeFile];
@@ -202,22 +224,16 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            double seconds = CMTimeGetSeconds(_duration);
-            // Reserve sample tables/container overhead; do NOT use fileLengthLimit or a short time range.
-            double reserve = fmax(350000.0, seconds * 280.0);
-            double totalRate = ((double)LVTargetBytes - reserve) * 8.0 / seconds * .90;
+            // Quality-oriented re-encode; no byte budget and no shrinking ladder. Copy handles
+            // every compatible local file regardless of size, so this path is only for rendering.
+            NSInteger rate = LVSourceVideoRate(_asset);
             BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
-            NSInteger audioRate = audio ? (totalRate < 90000 ? 16000 : (totalRate < 200000 ? 24000 : 48000)) : 0;
-            NSInteger baseRate = (NSInteger)fmin(6000000.0, floor(totalRate - audioRate));
-            if (baseRate < 12000) {
-                [self complete:nil error:LVError(32, @"This duration cannot retain audio/video within the safe upload budget.")]; return;
-            }
+            NSInteger audioRate = audio ? 128000 : 0; // 128 kbps AAC, channels capped at 2 in encode.
             // iOS has no public VTIsHardwareEncodeSupported API. Probe with writer settings/start;
             // any unsupported HEVC encoder retries the identical full-duration job as H.264.
             BOOL preferHEVC = YES;
-            for (NSUInteger attempt = 0; attempt < 4; attempt++) {
+            for (NSUInteger attempt = 0; attempt < 2; attempt++) {
                 if (self.isCancelled) { [self complete:nil error:nil]; return; }
-                NSInteger rate = MAX(12000, (NSInteger)(baseRate * pow(.72, (double)attempt)));
                 BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:preferHEVC attempt:attempt error:&error];
                 if (!ok && preferHEVC && !self.isCancelled) {
                     LVLog(@"HEVC failed; retry H264");
@@ -232,7 +248,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                        (long)error.code, (long long)LVSize(temp)]);
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            [self complete:nil error:error ?: LVError(33, @"Cannot produce a safe full-length video.")];
+            [self complete:nil error:error ?: LVError(33, @"Cannot produce a valid full-length video output.")];
         } @catch (__unused NSException *e) {
             [self complete:nil error:LVError(24, @"AVFoundation raised an exception while exporting.")];
         }
@@ -245,9 +261,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     NSArray<AVAssetTrack *> *videos = [_asset tracksWithMediaType:AVMediaTypeVideo];
     NSArray<AVAssetTrack *> *audios = [_asset tracksWithMediaType:AVMediaTypeAudio];
     if (!videos.count) { if (error) *error = LVError(40, @"No video track."); return NO; }
-    NSInteger maxEdge = rate < 70000 ? 256 : (rate < 130000 ? 360 :
-                        (rate < 260000 ? 480 : (rate < 600000 ? 720 : 960)));
-    NSInteger fps = rate < 90000 ? 12 : (rate < 180000 ? 15 : (rate < 450000 ? 24 : 30));
+    double sourceFPS = videos.firstObject.nominalFrameRate;
+    NSInteger fps = sourceFPS > 0 ? MIN(60, MAX(1, (NSInteger)llround(sourceFPS))) : 30;
     AVVideoComposition *composition = _videoComposition;
     CGSize renderSize;
     if (composition) {
@@ -260,9 +275,10 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         if (w < 2 || h < 2 || !isfinite(w) || !isfinite(h)) {
             if (error) *error = LVError(41, @"Invalid video dimensions."); return NO;
         }
-        CGFloat scale = fmin(1.0, (CGFloat)maxEdge / fmax(w, h));
-        renderSize = CGSizeMake(MAX(2, (NSInteger)floor(w * scale / 2) * 2),
-                                MAX(2, (NSInteger)floor(h * scale / 2) * 2));
+        // Preserve source resolution; the render path targets quality, not bytes.
+        renderSize = CGSizeMake(MAX(2, (NSInteger)floor(w / 2) * 2),
+                                MAX(2, (NSInteger)floor(h / 2) * 2));
+        CGFloat sx = renderSize.width / w, sy = renderSize.height / h;
         CGFloat sx = renderSize.width / w, sy = renderSize.height / h;
         CGAffineTransform t = track.preferredTransform;
         CGAffineTransform normalized = CGAffineTransformMake(t.a * sx, t.b * sy, t.c * sx, t.d * sy,
@@ -270,9 +286,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                                                              (t.ty - CGRectGetMinY(bounds)) * sy);
         AVMutableVideoComposition *c = [AVMutableVideoComposition videoComposition];
         c.renderSize = renderSize;
-        double sourceFPS = track.nominalFrameRate;
-        NSInteger selectedFPS = sourceFPS > 0 ? MIN(fps, MAX(1, (NSInteger)llround(sourceFPS))) : fps;
-        c.frameDuration = CMTimeMake(1, (int32_t)selectedFPS);
+        c.frameDuration = CMTimeMake(1, (int32_t)fps);
         AVMutableVideoCompositionLayerInstruction *layer =
             [AVMutableVideoCompositionLayerInstruction videoCompositionLayerInstructionWithAssetTrack:track];
         [layer setTransform:normalized atTime:kCMTimeZero];
@@ -324,15 +338,16 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     AVAssetReaderAudioMixOutput *audioOut = nil;
     AVAssetWriterInput *audioIn = nil;
     if (audios.count) {
-        NSInteger sampleRate = audioRate <= 16000 ? 22050 : (audioRate <= 24000 ? 32000 : 44100);
+        NSInteger channels = LVSourceChannels(audios.firstObject);
+        NSInteger sampleRate = 44100;
         NSDictionary *pcm = @{AVFormatIDKey:@(kAudioFormatLinearPCM), AVSampleRateKey:@(sampleRate),
-            AVNumberOfChannelsKey:@1, AVLinearPCMBitDepthKey:@16, AVLinearPCMIsFloatKey:@NO,
+            AVNumberOfChannelsKey:@(channels), AVLinearPCMBitDepthKey:@16, AVLinearPCMIsFloatKey:@NO,
             AVLinearPCMIsBigEndianKey:@NO, AVLinearPCMIsNonInterleaved:@NO};
         audioOut = [[AVAssetReaderAudioMixOutput alloc] initWithAudioTracks:audios audioSettings:pcm];
         audioOut.audioMix = _audioMix;
         audioOut.alwaysCopiesSampleData = NO;
         NSDictionary *aac = @{AVFormatIDKey:@(kAudioFormatMPEG4AAC), AVSampleRateKey:@(sampleRate),
-                              AVNumberOfChannelsKey:@1, AVEncoderBitRateKey:@(audioRate)};
+                              AVNumberOfChannelsKey:@(channels), AVEncoderBitRateKey:@(audioRate)};
         audioIn = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio outputSettings:aac];
         audioIn.expectsMediaDataInRealTime = NO;
         if (![reader canAddOutput:audioOut] || ![writer canApplyOutputSettings:aac forMediaType:AVMediaTypeAudio] ||
