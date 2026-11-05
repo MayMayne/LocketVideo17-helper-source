@@ -11,7 +11,7 @@
 #import <math.h>
 
 // No networking, entitlements, UIKit, or upload hooks. iOS 15+, arm64.
-static char LVJobKey, LVInternalKey;
+static char LVJobKey, LVInternalKey, LVRemoteConfigMarkerKey;
 static __thread unsigned LVOriginalDepth;
 static dispatch_queue_t LVLogQueue;
 static NSMutableSet<NSString *> *LVInstalled;
