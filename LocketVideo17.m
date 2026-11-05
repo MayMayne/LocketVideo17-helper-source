@@ -612,6 +612,146 @@ static void LVInstallUploaderChunkHook(void) {
     });
     class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
 }
+// Remote Config feature gate override. Only the two named keys are affected. The object the
+// original -configValueForKey: returned is NEVER replaced: a marker is attached to that same
+// instance so its own getters can answer true without changing the class the app receives.
+static Class LVRemoteConfigValueClass;
+static BOOL LVRemoteConfigGettersInstalled;
+// Probe only: a dynamic -boolValue send reaches whichever implementation the receiver's class
+// has (the replacement), which passes through to the real IMP while the marker is unset.
+@protocol LVRemoteConfigValueReading <NSObject>
+- (BOOL)boolValue;
+@end
+static BOOL LVRemoteConfigWantedKey(NSString *key) {
+    return [key isEqualToString:@"internal_camera_roll_video_upload_enabled"] ||
+           [key isEqualToString:@"camera_microphone_enabled"];
+}
+static BOOL LVRemoteConfigMarked(id value) {
+    return value && objc_getAssociatedObject(value, &LVRemoteConfigMarkerKey) != nil;
+}
+// Attach the marker (idempotent) and log the first application only.
+static void LVRemoteConfigMark(id value, NSString *key) {
+    if (!value || LVRemoteConfigMarked(value)) return;
+    @synchronized (LVRemoteConfigValueClass) {
+        static BOOL logged;
+        if (LVRemoteConfigMarked(value)) return;
+        BOOL original = NO;
+        @try { original = [(id<LVRemoteConfigValueReading>)value boolValue]; }
+        @catch (__unused NSException *e) { }
+        objc_setAssociatedObject(value, &LVRemoteConfigMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        if (!logged) {
+            logged = YES;
+            LVLog([NSString stringWithFormat:@"rc override key=%@ original=%d", key, original ? 1 : 0]);
+        }
+    }
+}
+// Replace a getter only on the class that implements it (owned methods), like LVInstallOne.
+static void LVRemoteConfigInstallGetter(Class cls, SEL selector, BOOL ownedOnly) {
+    Method method = NULL;
+    if (ownedOnly) {
+        if (!LVOwnsSelector(cls, selector, &method)) return;
+    } else {
+        method = class_getInstanceMethod(cls, selector);
+        if (!method) return;
+    }
+    NSString *key = [NSString stringWithFormat:@"%p:%s", cls, sel_getName(selector)];
+    if ([LVInstalled containsObject:key]) return;
+    IMP original = method_getImplementation(method);
+    IMP replacement = NULL;
+    if (sel_isEqual(selector, @selector(boolValue))) {
+        replacement = imp_implementationWithBlock(^BOOL(id value) {
+            if (LVRemoteConfigMarked(value)) return YES;
+            return ((BOOL (*)(id, SEL))original)(value, selector);
+        });
+    } else if (sel_isEqual(selector, @selector(stringValue))) {
+        replacement = imp_implementationWithBlock(^NSString *(id value) {
+            if (LVRemoteConfigMarked(value)) return @"1";
+            return ((NSString *(*)(id, SEL))original)(value, selector);
+        });
+    } else if (sel_isEqual(selector, @selector(numberValue))) {
+        replacement = imp_implementationWithBlock(^NSNumber *(id value) {
+            if (LVRemoteConfigMarked(value)) return @1;
+            return ((NSNumber *(*)(id, SEL))original)(value, selector);
+        });
+    }
+    if (!replacement) return;
+    class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
+    [LVInstalled addObject:key];
+}
+static void LVRemoteConfigInstallConfigHook(Class cls) {
+    SEL selectors[] = {@selector(configValueForKey:), @selector(configValueForKey:source:)};
+    for (unsigned i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
+        SEL selector = selectors[i];
+        Method method = class_getInstanceMethod(cls, selector); // source: variant is optional
+        if (!method) continue;
+        NSString *key = [NSString stringWithFormat:@"%p:%s", cls, sel_getName(selector)];
+        if ([LVInstalled containsObject:key]) continue;
+        IMP original = method_getImplementation(method);
+        IMP replacement;
+        if (i == 0) {
+            replacement = imp_implementationWithBlock(^id(id config, NSString *name) {
+                id value = ((id (*)(id, SEL, NSString *))original)(config, selector, name);
+                @try {
+                    if (value && LVRemoteConfigWantedKey(name) && [value isKindOfClass:LVRemoteConfigValueClass])
+                        LVRemoteConfigMark(value, name);
+                } @catch (__unused NSException *e) { }
+                return value; // the SAME instance the original returned
+            });
+        } else {
+            replacement = imp_implementationWithBlock(^id(id config, NSString *name, NSInteger source) {
+                id value = ((id (*)(id, SEL, NSString *, NSInteger))original)(config, selector, name, source);
+                @try {
+                    if (value && LVRemoteConfigWantedKey(name) && [value isKindOfClass:LVRemoteConfigValueClass])
+                        LVRemoteConfigMark(value, name);
+                } @catch (__unused NSException *e) { }
+                return value;
+            });
+        }
+        class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
+        [LVInstalled addObject:key];
+    }
+}
+static void LVInstallRemoteConfigOverrides(void) {
+    // One-shot install. While Firebase Remote Config is absent (not yet registered when this
+    // constructor runs) the guard stays open so the existing main-queue pass can retry once.
+    static BOOL installed;
+    static BOOL absentLogged;
+    if (installed) return;
+    @try {
+        Class rc = NSClassFromString(@"FIRRemoteConfig");
+        if (!rc) {
+            if (!absentLogged) { absentLogged = YES; LVLog(@"rc absent"); }
+            return;
+        }
+        Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
+        if (!valueClass) return;
+        if (!LVInstalled) LVInstalled = [NSMutableSet set];
+        LVRemoteConfigValueClass = valueClass;
+        LVRemoteConfigInstallGetter(valueClass, @selector(boolValue), NO);
+        LVRemoteConfigInstallGetter(valueClass, @selector(stringValue), NO);
+        LVRemoteConfigInstallGetter(valueClass, @selector(numberValue), NO);
+        LVRemoteConfigGettersInstalled = [LVInstalled containsObject:
+            [NSString stringWithFormat:@"%p:%s", valueClass, sel_getName(@selector(boolValue))]];
+        unsigned count = 0;
+        Class *classes = objc_copyClassList(&count);
+        for (unsigned i = 0; i < count; i++) {
+            Class cls = classes[i], cursor = cls;
+            if (cls == valueClass) continue;
+            while (cursor && cursor != valueClass) cursor = class_getSuperclass(cursor);
+            if (cursor != valueClass) continue;
+            // Never replace an inherited Method on a subclass.
+            LVRemoteConfigInstallGetter(cls, @selector(boolValue), YES);
+            LVRemoteConfigInstallGetter(cls, @selector(stringValue), YES);
+            LVRemoteConfigInstallGetter(cls, @selector(numberValue), YES);
+        }
+        free(classes);
+        if (!LVRemoteConfigGettersInstalled) return; // no getter override, nothing to force
+        LVRemoteConfigInstallConfigHook(rc);
+        installed = YES;
+    } @catch (__unused NSException *e) {
+        LVLog(@"rc install exception");
+    }
+}
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
         // Only the authorized Locket main executable, never extensions or unrelated apps.
@@ -622,10 +762,12 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVInstalled = [NSMutableSet set];
         LVInstallClasses();
         LVInstallUploaderChunkHook();
-        // Catch AVFoundation / GTMSession classes initialized during app startup too.
+        LVInstallRemoteConfigOverrides();
+        // Catch AVFoundation / GTMSession / Remote Config classes initialized during app startup too.
         dispatch_async(dispatch_get_main_queue(), ^{
             LVInstallClasses();
             LVInstallUploaderChunkHook();
+            LVInstallRemoteConfigOverrides();
         });
     }
 }

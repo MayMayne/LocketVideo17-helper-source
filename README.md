@@ -14,6 +14,19 @@ Authorized Locket 2.71.2 integration, arm64, iOS 15+. Only generated helper sour
 - Minimal rotating diagnostics at Documents/locket-video17.log: phases, duration, dimensions, bitrate, byte size, chunk raise, numeric error codes only; no paths, media metadata, identifiers or credentials.
 - If the app embeds GTMSessionUploadFetcher, hooks `beginFetchWithCompletionHandler:` there too (gentle no-op if the class is missing). Before the original call, if the receiver's `chunkSize` is between 1 byte and 32 MiB, it is raised once to 32 MiB via KVC `chunkSize` — fewer upload round-trips for huge files. One log line records old→new plus file length. Chunking is client-side only: it does not change Firebase Storage rules, so a finalize `403` remains a server rule.
 
+## Remote Config override (helper v5)
+
+A small, type-safe Remote Config override makes the app treat exactly two keys as enabled even when the server value is `false` or absent:
+
+- `internal_camera_roll_video_upload_enabled`
+- `camera_microphone_enabled`
+
+How it works: after the AVFoundation and GTMSession hooks (in the same constructor and again in the existing main-queue second pass), `LVInstallRemoteConfigOverrides()` resolves `NSClassFromString(@"FIRRemoteConfig")`. If the class is absent it logs one line `rc absent` and does nothing else — no crash, no other behavior change. `-[FIRRemoteConfig configValueForKey:]` (and `-configValueForKey:source:` when that method exists) is replaced on that class only; the replacement calls the original, and for one of the two keys attaches an associated marker object (a static `char` key) to the returned `FIRRemoteConfigValue` instance. **The same object the original returned is always returned** — no class substitution — so app code that inspects the value object still receives a genuine `FIRRemoteConfigValue`.
+
+`-boolValue`, `-stringValue` and `-numberValue` are replaced on `FIRRemoteConfigValue` and on any currently loaded subclass that *owns* those methods (`class_copyMethodList`, same pattern as `LVInstallOne`, never replacing an inherited Method). In each replacement, a marked receiver returns `YES` / `@"1"` / `@1`; every other receiver goes through the stored original IMP. Marking is idempotent, everything is wrapped in `@try/@catch`, and the first application logs exactly one line via the existing logger: `rc override key=<key> original=<0/1>`. Nothing is added to the logger afterwards, so there is no repeated spam and no secret.
+
+**Scope limit:** this is a client-side UI/feature gate only, for those two keys and nothing else. It does not change Firebase Storage security rules, does not alter entitlements, and does not guarantee server acceptance of any upload — a server-side rejection after upload is still a server decision. It adds no networking, upload, `postMoment` or purchase/UI code.
+
 ## Build
 
 Run `.github/workflows/build.yml` via workflow_dispatch on macos-latest. It uses the Xcode iPhoneOS SDK, clang -arch arm64 -fobjc-arc -fblocks -dynamiclib, minimum iOS 15, frameworks Foundation, AVFoundation, CoreMedia, CoreVideo, VideoToolbox, CoreGraphics and AudioToolbox; install name `@rpath/LocketVideo17.dylib`; `codesign --sign -` and verification. Artifact includes dylib, compiler output, dependencies, size and SHA256. Re-sign the entire app normally when packaging for sideloading. Do not modify signed dylib bytes after signing.
