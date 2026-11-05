@@ -18,6 +18,7 @@ static NSMutableSet<NSString *> *LVInstalled;
 static BOOL LVEnabled;
 
 typedef void (^LVCompletion)(void);
+typedef void (^LVFetchCompletion)(NSData *data, NSURLResponse *response, NSError *error);
 static NSError *LVError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:@"LocketVideo17" code:code
                           userInfo:@{NSLocalizedDescriptionKey:message}];
@@ -576,6 +577,41 @@ static void LVInstallClasses(void) {
         LVLog([NSString stringWithFormat:@"installed methods=%lu", (unsigned long)LVInstalled.count]);
     }
 }
+static void LVInstallUploaderChunkHook(void) {
+    static BOOL tried;
+    if (tried) return;
+    tried = YES;
+    // Optional private dependency: absent means uploads simply keep Apple's chunk size.
+    Class uploader = NSClassFromString(@"GTMSessionUploadFetcher");
+    SEL selector = @selector(beginFetchWithCompletionHandler:);
+    Method method = uploader ? class_getInstanceMethod(uploader, selector) : NULL;
+    if (!method) return;
+    IMP original = method_getImplementation(method);
+    __block IMP originalIMP = original;
+    IMP replacement = imp_implementationWithBlock(^(id fetcher, LVFetchCompletion completion) {
+        static BOOL raised;
+        @synchronized(uploader) {
+            if (!raised && [fetcher respondsToSelector:@selector(chunkSize)]) {
+                @try {
+                    NSInteger chunk = [[fetcher valueForKey:@"chunkSize"] integerValue];
+                    if (chunk >= 1 && chunk < 0x2000000) {
+                        [fetcher setValue:@(0x2000000) forKey:@"chunkSize"];
+                        raised = YES;
+                        int64_t length = -1;
+                        if ([fetcher respondsToSelector:@selector(uploadFileURL)])
+                            length = LVSize([fetcher valueForKey:@"uploadFileURL"]);
+                        if (length < 0 && [fetcher respondsToSelector:@selector(uploadData)])
+                            length = (int64_t)[[fetcher valueForKey:@"uploadData"] length];
+                        LVLog([NSString stringWithFormat:@"chunk %ld->%d length=%lld", (long)chunk,
+                               (int)0x2000000, (long long)length]);
+                    }
+                } @catch (__unused NSException *e) { }
+            }
+        }
+        ((void (*)(id, SEL, LVFetchCompletion))originalIMP)(fetcher, selector, completion);
+    });
+    class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
+}
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
         // Only the authorized Locket main executable, never extensions or unrelated apps.
@@ -585,7 +621,11 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVLogQueue = dispatch_queue_create("local.locket.video17.log", DISPATCH_QUEUE_SERIAL);
         LVInstalled = [NSMutableSet set];
         LVInstallClasses();
-        // Catch AVFoundation class-cluster implementations initialized during app startup too.
-        dispatch_async(dispatch_get_main_queue(), ^{ LVInstallClasses(); });
+        LVInstallUploaderChunkHook();
+        // Catch AVFoundation / GTMSession classes initialized during app startup too.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            LVInstallClasses();
+            LVInstallUploaderChunkHook();
+        });
     }
 }
