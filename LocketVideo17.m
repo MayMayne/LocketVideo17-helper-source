@@ -279,7 +279,6 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         renderSize = CGSizeMake(MAX(2, (NSInteger)floor(w / 2) * 2),
                                 MAX(2, (NSInteger)floor(h / 2) * 2));
         CGFloat sx = renderSize.width / w, sy = renderSize.height / h;
-        CGFloat sx = renderSize.width / w, sy = renderSize.height / h;
         CGAffineTransform t = track.preferredTransform;
         CGAffineTransform normalized = CGAffineTransformMake(t.a * sx, t.b * sy, t.c * sx, t.d * sy,
                                                              (t.tx - CGRectGetMinX(bounds)) * sx,
