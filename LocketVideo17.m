@@ -7,6 +7,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
 #import <unistd.h>
+#import <sys/stat.h>
 #import <math.h>
 
 // No networking, entitlements, UIKit, or upload hooks. iOS 15+, arm64.
@@ -55,9 +56,12 @@ static BOOL LVFullVideo(AVAssetExportSession *s, CMTime *duration) {
     } @catch (__unused NSException *e) { return NO; }
 }
 static int64_t LVSize(NSURL *url) {
-    NSNumber *n = nil;
-    [url getResourceValue:&n forKey:NSURLFileSizeKey error:NULL];
-    return n ? n.longLongValue : -1;
+    if (!url.isFileURL) return -1;
+    const char *path = url.fileSystemRepresentation;
+    struct stat info;
+    // A reused NSURL may cache resource values across retries; always inspect the current file.
+    if (!path || stat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) return -1;
+    return (int64_t)info.st_size;
 }
 static NSString *LVOutputType(AVAssetExportSession *s) {
     NSString *ext = s.outputURL.pathExtension.lowercaseString;
@@ -414,7 +418,7 @@ static BOOL LVBypass(id session) {
 }
 static void LVExport(AVAssetExportSession *session, SEL selector, LVCompletion completion, IMP original) {
     CMTime duration;
-    if (LVBypass(session) || !LVFullVideo(session, &duration)) {
+    if (LVBypass(session)) {
         // Reentrant superclass calls must stay on the original path, not allocate another helper job.
         LVOriginalDepth++;
         @try { ((void (*)(id, SEL, LVCompletion))original)(session, selector, completion); }
@@ -432,6 +436,24 @@ static void LVExport(AVAssetExportSession *session, SEL selector, LVCompletion c
                     return;
                 }
             }
+            // An export session represents one operation. Never replace its terminal job/state,
+            // including when a previous completion reenters before the callback batch has returned.
+            if (completion) {
+                LVCompletion callback = [completion copy];
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                    __attribute__((objc_precise_lifetime)) AVAssetExportSession *keepAlive = session;
+                    @try { callback(); }
+                    @catch (__unused NSException *e) { LVLog(@"completion exception"); }
+                    (void)keepAlive;
+                });
+            }
+            return;
+        }
+        if (!LVFullVideo(session, &duration)) {
+            LVOriginalDepth++;
+            @try { ((void (*)(id, SEL, LVCompletion))original)(session, selector, completion); }
+            @finally { LVOriginalDepth--; }
+            return;
         }
         job = [LV17Job new];
         job.owner = session; job.asset = session.asset; job.duration = duration;
@@ -441,7 +463,7 @@ static void LVExport(AVAssetExportSession *session, SEL selector, LVCompletion c
         job.callbacks = [NSMutableArray array];
         if (completion) [job.callbacks addObject:[completion copy]];
         job.state = AVAssetExportSessionStatusWaiting;
-        objc_setAssociatedObject(session, &LVJobKey, job, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(session, &LVJobKey, job, OBJC_ASSOCIATION_RETAIN);
     }
     // These reflect the real helper operation; the reader/writer never uses the 6 MB limit.
     session.timeRange = CMTimeRangeMake(kCMTimeZero, duration);
