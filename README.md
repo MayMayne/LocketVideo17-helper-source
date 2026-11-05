@@ -1,0 +1,27 @@
+# LocketVideo17 AVFoundation helper
+
+Authorized Locket 2.71.2 integration, arm64, iOS 15+. Only generated helper source belongs in this public repository: never an IPA, app executable, credentials, media, or device logs.
+
+## Scope
+
+- Main agent's Mach-O patches must implement 17-minute capture and remove local library selection limits. This dylib does not change capture, UI, purchase/entitlements, network or postMoment.
+- In the `Locket` main executable only, swizzles owned implementations of AVAssetExportSession and currently loaded subclasses: setTimeRange:, setFileLengthLimit:, exportAsynchronouslyWithCompletionHandler:, status, progress, error, cancelExport. No init-family hooking or fishhook dependency.
+- External finite video exports get the FULL original asset duration and fileLengthLimit=0 (not the app's 6 MB). Non-video, protected, indefinite/invalid-duration sessions use the original path. Internal-session marker and thread-local original-call guard prevent recursion. Encoding uses no internal export sessions.
+- Compatible local MP4/MOV/M4V sources <=9,200,000 bytes are copied byte-for-byte only if no app audioMix/videoComposition needs rendering and the container/extension match. Otherwise AVAssetReader + AVAssetWriter render the full duration, retain/mix audio to mono AAC, orient video correctly, and use dynamic HEVC/H.264 bitrates. Four progressively lower-rate attempts; HEVC hardware failure falls back to H.264. No duration truncation, fileLengthLimit encoding, custom upload, or server-call spoofing.
+- Budget: target 8,800,000 DECIMAL bytes with additional overhead reserve and 10% margin; actual final hard maximum 9,200,000 bytes. Verify size, duration (0.30 s tolerance for AAC/frame rounding), video presence and retained audio before publishing. A video too long/complex for this byte budget fails explicitly instead of publishing a truncated/oversize file.
+- Per-session associated state exposes truthful Waiting/Exporting/Completed/Failed/Cancelled, active-pass progress, and NSError. Retries can reset progress. One export invocation's supplied completion is delivered once on a background queue; repeated starts while active join the current job (each supplied callback gets one delivery). A later start reuses the session with a fresh job. Existing output files are NOT overwritten. Async job retains session until terminal state and releases the association cycle. cancelExport is cooperative; cancellation cannot interrupt a blocking AVFoundation read immediately.
+- Minimal rotating diagnostics at Documents/locket-video17.log: phases, duration, dimensions, bitrate, byte size, numeric error codes only; no paths, media metadata, identifiers or credentials.
+
+## Build
+
+Run `.github/workflows/build.yml` via workflow_dispatch on macos-latest. It uses the Xcode iPhoneOS SDK, clang -arch arm64 -fobjc-arc -fblocks -dynamiclib, minimum iOS 15, frameworks Foundation, AVFoundation, CoreMedia, CoreVideo, VideoToolbox, CoreGraphics and AudioToolbox; install name `@rpath/LocketVideo17.dylib`; `codesign --sign -` and verification. Artifact includes dylib, compiler output, dependencies, size and SHA256. Re-sign the entire app normally when packaging for sideloading. Do not modify signed dylib bytes after signing.
+
+## Integration / device checks (NOT performed by CI)
+
+Place LocketVideo17.dylib in Locket.app/Frameworks and load it as `@rpath/LocketVideo17.dylib` with the executable's Frameworks rpath (packaging is outside this helper). Avoid another dylib hooking the same methods after this helper. Preserve the exact executable name `Locket`.
+
+Test a tiny compatible file (byte-identical copy), large portrait/landscape + rotated video with audio, 1020-second capture, long library video, multiple exports, duplicate start, cancel mid-copy/encode/finish, existing destination, low disk, and failure paths. Confirm terminal status/error match callbacks, output <=9,200,000 bytes, full duration and audio, then test app upload separately. CI only compiles/signs; it does NOT test device playback, app upload or server acceptance.
+
+## Limitations
+
+The historical ~10 MB Firebase server cap cannot be removed here; even <9.2 MB is NOT a promise of server acceptance or unlimited uploads. 17 minutes inside ~8.8 MB means roughly 69 kbit/s total before overhead: tiny 256p-class / 12 fps video and low-rate mono audio, not HD. Very long videos may be mathematically impossible and fail with a budget error. App-provided video compositions retain their render size/instructions; custom compositor, HDR/Dolby Vision, uncommon codecs, irregular timestamps, iCloud assets, multi-track compositions and later-loaded private AVFoundation subclasses need real-device verification. Metadata/original color/HDR are not guaranteed in a re-encode. Modern async Swift export APIs are not hooked; this helper targets the legacy completion-handler export used by this app. KVO notifications are not synthesized (polling getters and completion handlers are supported). Enabling this source in any executable other than `Locket` is intentionally a no-op.
