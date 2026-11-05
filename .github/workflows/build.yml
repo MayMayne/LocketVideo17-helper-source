@@ -1,0 +1,37 @@
+name: Build LocketVideo17 arm64
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile iOS arm64 and ad-hoc sign
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" \
+            -miphoneos-version-min=15.0 -dynamiclib -fobjc-arc -fblocks -O2 \
+            -Wall -Wextra -Wno-deprecated-declarations \
+            -framework Foundation -framework AVFoundation -framework CoreMedia \
+            -framework CoreVideo -framework VideoToolbox -framework CoreGraphics \
+            -framework AudioToolbox -install_name @rpath/LocketVideo17.dylib \
+            LocketVideo17.m -o build/LocketVideo17.dylib 2>&1 | tee build/compiler.log
+          codesign --force --sign - --timestamp=none build/LocketVideo17.dylib
+          codesign --verify --strict --verbose=2 build/LocketVideo17.dylib
+          file build/LocketVideo17.dylib | tee build/file.txt
+          otool -L build/LocketVideo17.dylib | tee build/dependencies.txt
+          otool -l build/LocketVideo17.dylib > build/load-commands.txt
+          shasum -a 256 build/LocketVideo17.dylib | tee build/SHA256SUMS
+          wc -c build/LocketVideo17.dylib | tee build/size.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: LocketVideo17-arm64
+          path: build/
+          retention-days: 90
+          if-no-files-found: error
