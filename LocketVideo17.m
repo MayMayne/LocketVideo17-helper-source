@@ -819,35 +819,6 @@ static void LVInstallCameraGates(void) {
             LVLog([NSString stringWithFormat:@"camera kvc %@ %@", NSStringFromClass([obj class]), e.reason]);
         }
     };
-    SEL appear = @selector(viewDidLayoutSubviews);
-    if (camera) {
-        Method method = class_getInstanceMethod(camera, appear);
-        if (method) {
-            IMP original = method_getImplementation(method);
-            IMP replacement = imp_implementationWithBlock(^(id self) {
-                ((void (*)(id, SEL))original)(self, appear);
-                static BOOL once;
-                if (once) return;
-                once = YES;
-                @try {
-                    UIView *root = [self valueForKey:@"view"];
-                    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
-                    NSUInteger shown = 0;
-                    while (q.count && shown < 40) {
-                        UIView *v = q.firstObject;
-                        [q removeObjectAtIndex:0];
-                        if (v.hidden) { v.hidden = NO; shown++; }
-                        for (UIView *s in v.subviews) [q addObject:s];
-                    }
-                    LVLog([NSString stringWithFormat:@"camera unhid %lu", (unsigned long)shown]);
-                } @catch (__unused NSException *e) {
-                    LVLog(@"camera unhide failed");
-                }
-            });
-            class_replaceMethod(camera, appear, replacement, method_getTypeEncoding(method));
-            LVLog([NSString stringWithFormat:@"camera hooked %@", NSStringFromClass(camera)]);
-        }
-    }
     if (recorder) {
         // Swift stored properties are often KVC as _name, not name. Try both on the recorder class
         // by swizzling a method that runs while an instance exists is not available here.
