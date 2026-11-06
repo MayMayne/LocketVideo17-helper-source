@@ -17,7 +17,7 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64 -isysroot "$SDK" \
             -miphoneos-version-min=15.0 -dynamiclib -fobjc-arc -fblocks -O2 \
             -Wall -Wextra -Wno-deprecated-declarations \
-            -framework Foundation -framework AVFoundation -framework CoreMedia \
+            -framework UIKit -framework Foundation -framework AVFoundation -framework CoreMedia \
             -framework CoreVideo -framework VideoToolbox -framework CoreGraphics \
             -framework AudioToolbox -install_name @rpath/LocketVideo17.dylib \
             LocketVideo17.m -o build/LocketVideo17.dylib 2>&1 | tee build/compiler.log

@@ -5,6 +5,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <unistd.h>
@@ -820,13 +821,22 @@ static void LVInstallCameraGates(void) {
             IMP original = method_getImplementation(method);
             IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
                 force(self);
-            id recorderObj = nil;
-            @try { recorderObj = [self valueForKey:@"recorder"]; } @catch (__unused NSException *e) { }
-            if (!recorderObj) {
-                @try { recorderObj = [self valueForKey:@"_recorder"]; } @catch (__unused NSException *e) { }
-            }
-            if (recorderObj) force(recorderObj);
                 ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
+                // The mic button is a hidden subview, not a KVC field. Unhide camera controls.
+                @try {
+                    UIView *root = [self valueForKey:@"view"];
+                    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
+                    NSUInteger shown = 0;
+                    while (q.count && shown < 40) {
+                        UIView *v = q.firstObject;
+                        [q removeObjectAtIndex:0];
+                        if (v.hidden) { v.hidden = NO; shown++; }
+                        for (UIView *s in v.subviews) [q addObject:s];
+                    }
+                    LVLog([NSString stringWithFormat:@"camera unhid %lu", (unsigned long)shown]);
+                } @catch (__unused NSException *e) {
+                    LVLog(@"camera unhide failed");
+                }
             });
             class_replaceMethod(camera, appear, replacement, method_getTypeEncoding(method));
             LVLog([NSString stringWithFormat:@"camera hooked %@", NSStringFromClass(camera)]);
