@@ -643,15 +643,7 @@ static void LVRemoteConfigMarkAny(id value, NSString *key) {
         }
     } @catch (__unused NSException *e) { }
 }
-// When the value object is not FIRRemoteConfigValue, still force the getters the app actually calls.
-static void LVRemoteConfigForceClass(id value) {
-    if (!value) return;
-    Class cls = [value class];
-    if (!cls || cls == LVRemoteConfigValueClass) return;
-    LVRemoteConfigInstallGetter(cls, @selector(boolValue), NO);
-    LVRemoteConfigInstallGetter(cls, @selector(stringValue), NO);
-    LVRemoteConfigInstallGetter(cls, @selector(numberValue), NO);
-}
+static void LVRemoteConfigForceClass(id value);
 // Attach the marker (idempotent) and log the first application only.
 static void LVRemoteConfigMark(id value, NSString *key) {
     if (!value || LVRemoteConfigMarked(value)) return;
@@ -700,6 +692,14 @@ static void LVRemoteConfigInstallGetter(Class cls, SEL selector, BOOL ownedOnly)
     if (!replacement) return;
     class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
     [LVInstalled addObject:key];
+}
+static void LVRemoteConfigForceClass(id value) {
+    if (!value) return;
+    Class cls = [value class];
+    if (!cls || cls == LVRemoteConfigValueClass) return;
+    LVRemoteConfigInstallGetter(cls, @selector(boolValue), NO);
+    LVRemoteConfigInstallGetter(cls, @selector(stringValue), NO);
+    LVRemoteConfigInstallGetter(cls, @selector(numberValue), NO);
 }
 static void LVRemoteConfigInstallConfigHook(Class cls) {
     SEL selectors[] = {@selector(configValueForKey:), @selector(configValueForKey:source:),
