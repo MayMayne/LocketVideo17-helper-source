@@ -834,36 +834,7 @@ static void LVInstallCameraGates(void) {
         LVLog([NSString stringWithFormat:@"recorder ivars%@", names]);
     }
 }
-@interface LVMicButton : UIButton
-@end
-@implementation LVMicButton
-- (void)lvTap { self.selected = !self.selected; }
-@end
 static void LVInstallMicButton(void) {
-    Class camera = NSClassFromString(@"Camera.CameraViewController");
-    SEL appear = @selector(viewDidAppear:);
-    Method method = camera ? class_getInstanceMethod(camera, appear) : NULL;
-    if (!method) { LVLog(@"mic button: no appear"); return; }
-    IMP original = method_getImplementation(method);
-    IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
-        ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
-        @try {
-            UIView *root = [self valueForKey:@"view"];
-            if (!root || [root viewWithTag:290917]) return;
-            LVMicButton *b = [LVMicButton buttonWithType:UIButtonTypeSystem];
-            b.tag = 290917;
-            b.frame = CGRectMake(16, 54, 44, 44);
-            b.tintColor = UIColor.whiteColor;
-            if (@available(iOS 13, *))
-                [b setImage:[UIImage systemImageNamed:@"mic"] forState:UIControlStateNormal];
-            [b addTarget:b action:@selector(lvTap) forControlEvents:UIControlEventTouchUpInside];
-            [root addSubview:b];
-            LVLog(@"mic button added");
-        } @catch (__unused NSException *e) {
-            LVLog(@"mic button failed");
-        }
-    });
-    class_replaceMethod(camera, appear, replacement, method_getTypeEncoding(method));
 }
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
