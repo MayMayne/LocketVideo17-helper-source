@@ -623,11 +623,34 @@ static BOOL LVRemoteConfigGettersInstalled;
 - (BOOL)boolValue;
 @end
 static BOOL LVRemoteConfigWantedKey(NSString *key) {
+    if (![key isKindOfClass:NSString.class]) return NO;
     return [key isEqualToString:@"internal_camera_roll_video_upload_enabled"] ||
-           [key isEqualToString:@"camera_microphone_enabled"];
+           [key isEqualToString:@"camera_microphone_enabled"] ||
+           [key isEqualToString:@"camera_roll_video_upload_enabled"];
 }
 static BOOL LVRemoteConfigMarked(id value) {
     return value && objc_getAssociatedObject(value, &LVRemoteConfigMarkerKey) != nil;
+}
+// Force-true even when the value object is not FIRRemoteConfigValue (Swift wrapper).
+static void LVRemoteConfigMarkAny(id value, NSString *key) {
+    if (!value || LVRemoteConfigMarked(value)) return;
+    @try {
+        objc_setAssociatedObject(value, &LVRemoteConfigMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        static BOOL logged;
+        if (!logged) {
+            logged = YES;
+            LVLog([NSString stringWithFormat:@"rc mark class=%@ key=%@", NSStringFromClass([value class]), key]);
+        }
+    } @catch (__unused NSException *e) { }
+}
+// When the value object is not FIRRemoteConfigValue, still force the getters the app actually calls.
+static void LVRemoteConfigForceClass(id value) {
+    if (!value) return;
+    Class cls = [value class];
+    if (!cls || cls == LVRemoteConfigValueClass) return;
+    LVRemoteConfigInstallGetter(cls, @selector(boolValue), NO);
+    LVRemoteConfigInstallGetter(cls, @selector(stringValue), NO);
+    LVRemoteConfigInstallGetter(cls, @selector(numberValue), NO);
 }
 // Attach the marker (idempotent) and log the first application only.
 static void LVRemoteConfigMark(id value, NSString *key) {
@@ -679,7 +702,8 @@ static void LVRemoteConfigInstallGetter(Class cls, SEL selector, BOOL ownedOnly)
     [LVInstalled addObject:key];
 }
 static void LVRemoteConfigInstallConfigHook(Class cls) {
-    SEL selectors[] = {@selector(configValueForKey:), @selector(configValueForKey:source:)};
+    SEL selectors[] = {@selector(configValueForKey:), @selector(configValueForKey:source:),
+                       @selector(objectForKeyedSubscript:)};
     for (unsigned i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
         SEL selector = selectors[i];
         Method method = class_getInstanceMethod(cls, selector); // source: variant is optional
@@ -688,12 +712,14 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
         if ([LVInstalled containsObject:key]) continue;
         IMP original = method_getImplementation(method);
         IMP replacement;
-        if (i == 0) {
-            replacement = imp_implementationWithBlock(^id(id config, NSString *name) {
-                id value = ((id (*)(id, SEL, NSString *))original)(config, selector, name);
+        if (i == 0 || i == 2) {
+            replacement = imp_implementationWithBlock(^id(id config, id name) {
+                id value = ((id (*)(id, SEL, id))original)(config, selector, name);
                 @try {
-                    if (value && LVRemoteConfigWantedKey(name) && [value isKindOfClass:LVRemoteConfigValueClass])
-                        LVRemoteConfigMark(value, name);
+                    if (value && LVRemoteConfigWantedKey(name)) {
+                        LVRemoteConfigForceClass(value);
+                        LVRemoteConfigMarkAny(value, name);
+                    }
                 } @catch (__unused NSException *e) { }
                 return value; // the SAME instance the original returned
             });
@@ -701,8 +727,10 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
             replacement = imp_implementationWithBlock(^id(id config, NSString *name, NSInteger source) {
                 id value = ((id (*)(id, SEL, NSString *, NSInteger))original)(config, selector, name, source);
                 @try {
-                    if (value && LVRemoteConfigWantedKey(name) && [value isKindOfClass:LVRemoteConfigValueClass])
-                        LVRemoteConfigMark(value, name);
+                    if (value && LVRemoteConfigWantedKey(name)) {
+                        LVRemoteConfigForceClass(value);
+                        LVRemoteConfigMarkAny(value, name);
+                    }
                 } @catch (__unused NSException *e) { }
                 return value;
             });
