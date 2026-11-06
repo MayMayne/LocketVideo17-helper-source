@@ -835,6 +835,27 @@ static void LVInstallCameraGates(void) {
     }
 }
 static void LVInstallMicButton(void) {
+    Class filter = NSClassFromString(@"PHPickerFilter");
+    SEL images = NSSelectorFromString(@"images");
+    SEL anyOf = NSSelectorFromString(@"anyFilterMatchingSubfilters:");
+    if (!filter || ![filter respondsToSelector:images]) {
+        LVLog(@"picker filter class absent");
+        return;
+    }
+    Method method = class_getClassMethod(filter, images);
+    if (!method) { LVLog(@"picker images absent"); return; }
+    IMP original = method_getImplementation(method);
+    IMP replacement = imp_implementationWithBlock(^id(id cls) {
+        id image = ((id (*)(id, SEL))original)(cls, images);
+        id video = [cls respondsToSelector:NSSelectorFromString(@"videos")]
+            ? ((id (*)(id, SEL))objc_msgSend)(cls, NSSelectorFromString(@"videos")) : nil;
+        if (image && video && [cls respondsToSelector:anyOf]) {
+            LVLog(@"picker images+videos");
+            return ((id (*)(id, SEL, id))objc_msgSend)(cls, anyOf, @[image, video]);
+        }
+        return image;
+    });
+    class_replaceMethod(object_getClass(filter), images, replacement, method_getTypeEncoding(method));
 }
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
