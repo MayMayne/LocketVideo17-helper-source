@@ -836,46 +836,6 @@ static void LVInstallCameraGates(void) {
     }
 }
 static void LVInstallMicButton(void) {
-    Class session = AVCaptureSession.class;
-    SEL add = @selector(addInput:);
-    Method method = class_getInstanceMethod(session, add);
-    if (!method) { LVLog(@"addInput absent"); return; }
-    IMP original = method_getImplementation(method);
-    IMP replacement = imp_implementationWithBlock(^(AVCaptureSession *self, AVCaptureInput *input) {
-        ((void (*)(id, SEL, id))original)(self, add, input);
-        if (![input isKindOfClass:AVCaptureDeviceInput.class]) return;
-        AVCaptureDevice *dev = ((AVCaptureDeviceInput *)input).device;
-        if (![dev hasMediaType:AVMediaTypeVideo]) return;
-        AVCaptureDevice *mic = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
-        if (!mic) { LVLog(@"no mic device"); return; }
-        NSError *err = nil;
-        AVCaptureDeviceInput *ain = [AVCaptureDeviceInput deviceInputWithDevice:mic error:&err];
-        if (ain && [self canAddInput:ain]) {
-            ((void (*)(id, SEL, id))original)(self, add, ain);
-            LVLog(@"mic input added");
-        } else {
-            LVLog([NSString stringWithFormat:@"mic input skip %@", err.localizedDescription ?: @"cannot add"]);
-        }
-    });
-    class_replaceMethod(session, add, replacement, method_getTypeEncoding(method));
-    LVLog(@"addInput hooked");
-    Class filter = NSClassFromString(@"PHPickerFilter");
-    SEL images = NSSelectorFromString(@"images");
-    SEL videos = NSSelectorFromString(@"videos");
-    SEL anyOf = NSSelectorFromString(@"anyFilterMatchingSubfilters:");
-    Method fm = filter ? class_getClassMethod(filter, images) : NULL;
-    if (!fm) { LVLog(@"picker images absent"); return; }
-    IMP fimp = method_getImplementation(fm);
-    IMP frep = imp_implementationWithBlock(^id(id cls) {
-        id image = ((id (*)(id, SEL))fimp)(cls, images);
-        id video = [cls respondsToSelector:videos] ? ((id (*)(id, SEL))objc_msgSend)(cls, videos) : nil;
-        if (image && video && [cls respondsToSelector:anyOf]) {
-            LVLog(@"picker images+videos");
-            return ((id (*)(id, SEL, id))objc_msgSend)(cls, anyOf, @[image, video]);
-        }
-        return image;
-    });
-    class_replaceMethod(object_getClass(filter), images, frep, method_getTypeEncoding(fm));
 }
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
