@@ -847,6 +847,19 @@ static void LVInstallCameraGates(void) {
         LVLog([NSString stringWithFormat:@"recorder ivars%@", names]);
     }
 }
+static void LVInstallPicker(void) {
+    Class cfg = NSClassFromString(@"PHPickerConfiguration");
+    SEL sel = NSSelectorFromString(@"setFilter:");
+    Method method = cfg ? class_getInstanceMethod(cfg, sel) : NULL;
+    if (!method) { LVLog(@"picker setFilter absent"); return; }
+    IMP original = method_getImplementation(method);
+    IMP replacement = imp_implementationWithBlock(^(id self, id filter) {
+        LVLog(@"picker setFilter called");
+        ((void (*)(id, SEL, id))original)(self, sel, nil); // nil = images and videos
+    });
+    class_replaceMethod(cfg, sel, replacement, method_getTypeEncoding(method));
+    LVLog(@"picker filter cleared");
+}
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
         // Only the authorized Locket main executable, never extensions or unrelated apps.
@@ -859,6 +872,7 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVInstallUploaderChunkHook();
         LVInstallRemoteConfigOverrides();
         LVInstallCameraGates();
+        LVInstallPicker();
         dispatch_async(dispatch_get_main_queue(), ^{
             LVInstallClasses();
             LVInstallUploaderChunkHook();
