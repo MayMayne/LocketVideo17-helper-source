@@ -616,7 +616,6 @@ static void LVInstallUploaderChunkHook(void) {
 // original -configValueForKey: returned is NEVER replaced: a marker is attached to that same
 // instance so its own getters can answer true without changing the class the app receives.
 static Class LVRemoteConfigValueClass;
-static BOOL LVRemoteConfigGettersInstalled;
 // Probe only: a dynamic -boolValue send reaches whichever implementation the receiver's class
 // has (the replacement), which passes through to the real IMP while the marker is unset.
 @protocol LVRemoteConfigValueReading <NSObject>
