@@ -814,15 +814,16 @@ static void LVInstallCameraGates(void) {
             LVLog([NSString stringWithFormat:@"camera kvc %@ %@", NSStringFromClass([obj class]), e.reason]);
         }
     };
-    SEL appear = @selector(viewDidAppear:);
+    SEL appear = @selector(viewDidLayoutSubviews);
     if (camera) {
         Method method = class_getInstanceMethod(camera, appear);
         if (method) {
             IMP original = method_getImplementation(method);
-            IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
-                force(self);
-                ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
-                // The mic button is a hidden subview, not a KVC field. Unhide camera controls.
+            IMP replacement = imp_implementationWithBlock(^(id self) {
+                ((void (*)(id, SEL))original)(self, appear);
+                static BOOL once;
+                if (once) return;
+                once = YES;
                 @try {
                     UIView *root = [self valueForKey:@"view"];
                     NSMutableArray *q = [NSMutableArray arrayWithObject:root];
