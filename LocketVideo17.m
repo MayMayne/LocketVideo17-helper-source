@@ -747,26 +747,34 @@ static void LVInstallRemoteConfigOverrides(void) {
         // with one built from @"1", instead of marking the server object.
         SEL selectors[] = {@selector(configValueForKey:), @selector(objectForKeyedSubscript:)};
         NSUInteger hooked = 0;
-        for (unsigned i = 0; i < 2; i++) {
-            SEL selector = selectors[i];
-            Method method = class_getInstanceMethod(rc, selector);
-            if (!method) continue;
-            IMP original = method_getImplementation(method);
-            IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
-                if (LVRemoteConfigWantedKey(name)) {
-                    id forced = LVForcedConfigValue();
-                    if (forced) {
-                        static BOOL logged;
-                        if (!logged) { logged = YES; LVLog([NSString stringWithFormat:@"rc force %@", name]); }
-                        return forced;
+        unsigned n = 0;
+        Class *all = objc_copyClassList(&n);
+        NSMutableString *owners = [NSMutableString string];
+        for (unsigned c = 0; c < n; c++) {
+            for (unsigned i = 0; i < 2; i++) {
+                SEL selector = selectors[i];
+                Method owned = NULL;
+                if (!LVOwnsSelector(all[c], selector, &owned)) continue;
+                if (owners.length < 400)
+                    [owners appendFormat:@" %s:%s", class_getName(all[c]), sel_getName(selector)];
+                IMP original = method_getImplementation(owned);
+                IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
+                    if (LVRemoteConfigWantedKey(name)) {
+                        id forced = LVForcedConfigValue();
+                        if (forced) {
+                            LVLog([NSString stringWithFormat:@"rc force %@ via %@", name, NSStringFromClass([config class])]);
+                            return forced;
+                        }
                     }
-                }
-                return ((id (*)(id, SEL, id))original)(config, selector, name);
-            });
-            class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
-            hooked++;
+                    return ((id (*)(id, SEL, id))original)(config, selector, name);
+                });
+                class_replaceMethod(all[c], selector, replacement, method_getTypeEncoding(owned));
+                hooked++;
+            }
         }
-        installed = hooked > 0;
+        free(all);
+        installed = YES;
+        LVLog([NSString stringWithFormat:@"rc owners%@", owners]);
         LVLog([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
     } @catch (__unused NSException *e) {
         LVLog(@"rc install exception");
