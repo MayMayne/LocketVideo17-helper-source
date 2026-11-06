@@ -725,42 +725,52 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
     }
 }
 static void LVInstallRemoteConfigOverrides(void) {
-    // One-shot install. While Firebase Remote Config is absent (not yet registered when this
-    // constructor runs) the guard stays open so the existing main-queue pass can retry once.
     static BOOL installed;
     static BOOL absentLogged;
     if (installed) return;
     @try {
-        Class rc = NSClassFromString(@"FIRRemoteConfig");
-        if (!rc) {
-            if (!absentLogged) { absentLogged = YES; LVLog(@"rc absent"); }
-            return;
-        }
-        Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
-        if (!valueClass) return;
         if (!LVInstalled) LVInstalled = [NSMutableSet set];
-        LVRemoteConfigValueClass = valueClass;
-        LVRemoteConfigInstallGetter(valueClass, @selector(boolValue), NO);
-        LVRemoteConfigInstallGetter(valueClass, @selector(stringValue), NO);
-        LVRemoteConfigInstallGetter(valueClass, @selector(numberValue), NO);
-        LVRemoteConfigGettersInstalled = [LVInstalled containsObject:
-            [NSString stringWithFormat:@"%p:%s", valueClass, sel_getName(@selector(boolValue))]];
-        unsigned count = 0;
-        Class *classes = objc_copyClassList(&count);
-        for (unsigned i = 0; i < count; i++) {
-            Class cls = classes[i], cursor = cls;
-            if (cls == valueClass) continue;
-            while (cursor && cursor != valueClass) cursor = class_getSuperclass(cursor);
-            if (cursor != valueClass) continue;
-            // Never replace an inherited Method on a subclass.
-            LVRemoteConfigInstallGetter(cls, @selector(boolValue), YES);
-            LVRemoteConfigInstallGetter(cls, @selector(stringValue), YES);
-            LVRemoteConfigInstallGetter(cls, @selector(numberValue), YES);
+        // Locket reads flags through RemoteConfigClient, not FIRRemoteConfig.configValueForKey:.
+        // boolValueFromCacheWithKey:defaultValue: is the ObjC entry that cache reads use.
+        Class client = NSClassFromString(@"RemoteConfigClient") ?:
+                       NSClassFromString(@"_TtC10AppFeature22RemoteConfigClientLive");
+        SEL cacheSel = @selector(boolValueFromCacheWithKey:defaultValue:);
+        Method cacheMethod = client ? class_getInstanceMethod(client, cacheSel) : NULL;
+        if (!cacheMethod) {
+            unsigned n = 0;
+            Class *all = objc_copyClassList(&n);
+            for (unsigned i = 0; i < n && !cacheMethod; i++) {
+                if (LVOwnsSelector(all[i], cacheSel, &cacheMethod)) client = all[i];
+                else cacheMethod = NULL;
+            }
+            free(all);
         }
-        free(classes);
-        if (!LVRemoteConfigGettersInstalled) return; // no getter override, nothing to force
-        LVRemoteConfigInstallConfigHook(rc);
-        installed = YES;
+        if (cacheMethod && client) {
+            IMP original = method_getImplementation(cacheMethod);
+            IMP replacement = imp_implementationWithBlock(^BOOL(id self, NSString *key, BOOL fallback) {
+                if (LVRemoteConfigWantedKey(key)) {
+                    LVLog([NSString stringWithFormat:@"rc cache force key=%@", key]);
+                    return YES;
+                }
+                return ((BOOL (*)(id, SEL, NSString *, BOOL))original)(self, cacheSel, key, fallback);
+            });
+            class_replaceMethod(client, cacheSel, replacement, method_getTypeEncoding(cacheMethod));
+            LVLog([NSString stringWithFormat:@"rc cache hooked %@", NSStringFromClass(client)]);
+            installed = YES;
+        } else if (!absentLogged) {
+            absentLogged = YES;
+            LVLog(@"rc cache absent");
+        }
+        // Keep the FIRRemoteConfig path as a secondary hook when that class exists.
+        Class rc = NSClassFromString(@"FIRRemoteConfig");
+        Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
+        if (rc && valueClass) {
+            LVRemoteConfigValueClass = valueClass;
+            LVRemoteConfigInstallGetter(valueClass, @selector(boolValue), NO);
+            LVRemoteConfigInstallGetter(valueClass, @selector(stringValue), NO);
+            LVRemoteConfigInstallGetter(valueClass, @selector(numberValue), NO);
+            LVRemoteConfigInstallConfigHook(rc);
+        }
     } @catch (__unused NSException *e) {
         LVLog(@"rc install exception");
     }
