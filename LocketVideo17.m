@@ -623,6 +623,7 @@ static Class LVRemoteConfigValueClass;
 @protocol LVRemoteConfigValueReading <NSObject>
 - (BOOL)boolValue;
 @end
+static char LVRemoteConfigMarkerKey;
 static BOOL LVRemoteConfigWantedKey(NSString *key) {
     if (![key isKindOfClass:NSString.class]) return NO;
     return [key isEqualToString:@"internal_camera_roll_video_upload_enabled"] ||
@@ -747,41 +748,45 @@ static void LVInstallRemoteConfigOverrides(void) {
         }
         // Same mechanism as LocketFull6 on 2.69: replace the returned value object
         // with one built from @"1", instead of marking the server object.
-        SEL selectors[] = {@selector(configValueForKey:), @selector(objectForKeyedSubscript:)};
+        SEL selectors[] = {
+            @selector(configValueForKey:),
+            @selector(objectForKeyedSubscript:),
+            NSSelectorFromString(@"configValueForKey:source:"),
+            NSSelectorFromString(@"remoteConfigValueForKey:")
+        };
         NSUInteger hooked = 0;
         unsigned n = 0;
         Class *all = objc_copyClassList(&n);
-        NSMutableString *owners = [NSMutableString string];
         for (unsigned c = 0; c < n; c++) {
-            for (unsigned i = 0; i < 2; i++) {
+            for (unsigned i = 0; i < 4; i++) {
                 SEL selector = selectors[i];
+                Method method = class_getInstanceMethod(all[c], selector);
+                if (!method) continue;
+                // Only the class that owns the method, but include Swift subclasses that
+                // inherit FIRRemoteConfig's reader — those are the 2.71.2 path.
+                Class owner = class_getSuperclass(all[c]);
                 Method owned = NULL;
-                if (!LVOwnsSelector(all[c], selector, &owned)) continue;
-                if (owners.length < 400)
-                    [owners appendFormat:@" %s:%s", class_getName(all[c]), sel_getName(selector)];
-                IMP original = method_getImplementation(owned);
+                BOOL owns = LVOwnsSelector(all[c], selector, &owned);
+                if (!owns && owner != rc && all[c] != rc) continue;
+                if (!owns) method = class_getInstanceMethod(rc, selector);
+                if (!method) continue;
+                IMP original = method_getImplementation(method);
                 IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
-                    static NSUInteger seen;
-                    if (seen < 30 && [name isKindOfClass:NSString.class]) {
-                        seen++;
-                        LVLog([NSString stringWithFormat:@"rc call %@ %@", NSStringFromClass([config class]), name]);
-                    }
                     if (LVRemoteConfigWantedKey(name)) {
                         id forced = LVForcedConfigValue();
                         if (forced) {
-                            LVLog([NSString stringWithFormat:@"rc force %@ via %@", name, NSStringFromClass([config class])]);
+                            LVLog([NSString stringWithFormat:@"rc force %@ %@", name, NSStringFromClass([config class])]);
                             return forced;
                         }
                     }
                     return ((id (*)(id, SEL, id))original)(config, selector, name);
                 });
-                class_replaceMethod(all[c], selector, replacement, method_getTypeEncoding(owned));
+                class_replaceMethod(all[c], selector, replacement, method_getTypeEncoding(method));
                 hooked++;
             }
         }
         free(all);
         installed = YES;
-        LVLog([NSString stringWithFormat:@"rc owners%@", owners]);
         LVLog([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
     } @catch (__unused NSException *e) {
         LVLog(@"rc install exception");
