@@ -725,51 +725,52 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
 }
 static void LVInstallRemoteConfigOverrides(void) {
     static BOOL installed;
-    static BOOL absentLogged;
     if (installed) return;
     @try {
         if (!LVInstalled) LVInstalled = [NSMutableSet set];
-        // Locket reads flags through RemoteConfigClient, not FIRRemoteConfig.configValueForKey:.
-        // boolValueFromCacheWithKey:defaultValue: is the ObjC entry that cache reads use.
-        Class client = NSClassFromString(@"RemoteConfigClient") ?:
-                       NSClassFromString(@"_TtC10AppFeature22RemoteConfigClientLive");
-        SEL cacheSel = @selector(boolValueFromCacheWithKey:defaultValue:);
-        Method cacheMethod = client ? class_getInstanceMethod(client, cacheSel) : NULL;
-        if (!cacheMethod) {
-            unsigned n = 0;
-            Class *all = objc_copyClassList(&n);
-            for (unsigned i = 0; i < n && !cacheMethod; i++) {
-                if (LVOwnsSelector(all[i], cacheSel, &cacheMethod)) client = all[i];
-                else cacheMethod = NULL;
-            }
-            free(all);
-        }
-        if (cacheMethod && client) {
-            IMP original = method_getImplementation(cacheMethod);
-            IMP replacement = imp_implementationWithBlock(^BOOL(id self, NSString *key, BOOL fallback) {
-                if (LVRemoteConfigWantedKey(key)) {
-                    LVLog([NSString stringWithFormat:@"rc cache force key=%@", key]);
-                    return YES;
-                }
-                return ((BOOL (*)(id, SEL, NSString *, BOOL))original)(self, cacheSel, key, fallback);
-            });
-            class_replaceMethod(client, cacheSel, replacement, method_getTypeEncoding(cacheMethod));
-            LVLog([NSString stringWithFormat:@"rc cache hooked %@", NSStringFromClass(client)]);
-            installed = YES;
-        } else if (!absentLogged) {
-            absentLogged = YES;
-            LVLog(@"rc cache absent");
-        }
-        // Keep the FIRRemoteConfig path as a secondary hook when that class exists.
         Class rc = NSClassFromString(@"FIRRemoteConfig");
         Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
-        if (rc && valueClass) {
+        if (!rc) {
+            LVLog(@"rc FIRRemoteConfig absent");
+            return;
+        }
+        LVLog([NSString stringWithFormat:@"rc class %@", NSStringFromClass(rc)]);
+        if (valueClass) {
             LVRemoteConfigValueClass = valueClass;
             LVRemoteConfigInstallGetter(valueClass, @selector(boolValue), NO);
             LVRemoteConfigInstallGetter(valueClass, @selector(stringValue), NO);
             LVRemoteConfigInstallGetter(valueClass, @selector(numberValue), NO);
-            LVRemoteConfigInstallConfigHook(rc);
         }
+        // Log every key the app actually reads, and force the two video/mic gates.
+        SEL sub = @selector(objectForKeyedSubscript:);
+        Method method = class_getInstanceMethod(rc, sub);
+        if (!method) method = class_getInstanceMethod(rc, @selector(configValueForKey:));
+        if (!method) {
+            LVLog(@"rc no config reader");
+            return;
+        }
+        SEL selector = method_getName(method);
+        IMP original = method_getImplementation(method);
+        IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
+            id value = ((id (*)(id, SEL, id))original)(config, selector, name);
+            @try {
+                if ([name isKindOfClass:NSString.class]) {
+                    static NSUInteger logged;
+                    if (logged < 40) {
+                        logged++;
+                        LVLog([NSString stringWithFormat:@"rc read %@", name]);
+                    }
+                    if (LVRemoteConfigWantedKey(name) && value) {
+                        LVRemoteConfigForceClass(value);
+                        LVRemoteConfigMarkAny(value, name);
+                    }
+                }
+            } @catch (__unused NSException *e) { }
+            return value;
+        });
+        class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
+        installed = YES;
+        LVLog(@"rc reader hooked");
     } @catch (__unused NSException *e) {
         LVLog(@"rc install exception");
     }
