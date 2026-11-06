@@ -775,7 +775,55 @@ static void LVInstallRemoteConfigOverrides(void) {
         LVLog(@"rc install exception");
     }
 }
-__attribute__((constructor)) static void LV17Load(void) {
+static void LVInstallCameraGates(void) {
+    static BOOL done;
+    if (done) return;
+    Class recorder = NSClassFromString(@"Camera.Recorder") ?: NSClassFromString(@"_TtC6Camera8Recorder");
+    Class camera = NSClassFromString(@"Camera.CameraViewController") ?: NSClassFromString(@"_TtC6Camera20CameraViewController");
+    if (!recorder && !camera) {
+        LVLog(@"camera classes absent");
+        return;
+    }
+    done = YES;
+    void (^force)(id) = ^(id obj) {
+        if (!obj) return;
+        @try {
+            [obj setValue:@YES forKey:@"microphoneEnabled"];
+            [obj setValue:@YES forKey:@"microphoneButtonEnabled"];
+            [obj setValue:@YES forKey:@"microphoneConfigured"];
+            [obj setValue:@YES forKey:@"cameraRollVideoUploadEnabled"];
+            [obj setValue:@YES forKey:@"longerVideosEnabled"];
+            LVLog([NSString stringWithFormat:@"camera forced %@", NSStringFromClass([obj class])]);
+        } @catch (NSException *e) {
+            LVLog([NSString stringWithFormat:@"camera kvc %@ %@", NSStringFromClass([obj class]), e.reason]);
+        }
+    };
+    SEL appear = @selector(viewDidAppear:);
+    for (Class cls in @[camera ?: NSNull.null, recorder ?: NSNull.null]) {
+        if ((id)cls == NSNull.null) continue;
+        Method method = class_getInstanceMethod(cls, appear);
+        if (!method && cls == recorder) {
+            // Recorder is not a view controller. Force on init-family is unsafe; use a timer once.
+            continue;
+        }
+        if (!method) continue;
+        IMP original = method_getImplementation(method);
+        IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
+            force(self);
+            ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
+        });
+        class_replaceMethod(cls, appear, replacement, method_getTypeEncoding(method));
+        LVLog([NSString stringWithFormat:@"camera hooked %@", NSStringFromClass(cls)]);
+    }
+    if (recorder) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            unsigned n = 0;
+            // Walk live objects is not available. Log that recorder class exists so the next step is clear.
+            LVLog([NSString stringWithFormat:@"recorder class %@", NSStringFromClass(recorder)]);
+            (void)n;
+        });
+    }
+}
     @autoreleasepool {
         // Only the authorized Locket main executable, never extensions or unrelated apps.
         NSString *executable = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleExecutable"];
@@ -786,11 +834,12 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVInstallClasses();
         LVInstallUploaderChunkHook();
         LVInstallRemoteConfigOverrides();
-        // Catch AVFoundation / GTMSession / Remote Config classes initialized during app startup too.
+        LVInstallCameraGates();
         dispatch_async(dispatch_get_main_queue(), ^{
             LVInstallClasses();
             LVInstallUploaderChunkHook();
             LVInstallRemoteConfigOverrides();
+            LVInstallCameraGates();
         });
     }
 }
