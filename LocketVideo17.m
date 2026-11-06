@@ -731,7 +731,8 @@ static id LVForcedConfigValue(void) {
     if (![valueClass instancesRespondToSelector:initSel]) return nil;
     NSData *one = [@"1" dataUsingEncoding:NSUTF8StringEncoding];
     id value = [valueClass alloc];
-    return ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(value, initSel, one, 1);
+    // LocketFull6 passes source 0, not 1.
+    return ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(value, initSel, one, 0);
 }
 static void LVInstallRemoteConfigOverrides(void) {
     static BOOL installed;
@@ -759,6 +760,11 @@ static void LVInstallRemoteConfigOverrides(void) {
                     [owners appendFormat:@" %s:%s", class_getName(all[c]), sel_getName(selector)];
                 IMP original = method_getImplementation(owned);
                 IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
+                    static NSUInteger seen;
+                    if (seen < 30 && [name isKindOfClass:NSString.class]) {
+                        seen++;
+                        LVLog([NSString stringWithFormat:@"rc call %@ %@", NSStringFromClass([config class]), name]);
+                    }
                     if (LVRemoteConfigWantedKey(name)) {
                         id forced = LVForcedConfigValue();
                         if (forced) {
