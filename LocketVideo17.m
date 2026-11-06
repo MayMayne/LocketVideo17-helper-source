@@ -644,22 +644,7 @@ static void LVRemoteConfigMarkAny(id value, NSString *key) {
     } @catch (__unused NSException *e) { }
 }
 static void LVRemoteConfigForceClass(id value);
-// Attach the marker (idempotent) and log the first application only.
-static void LVRemoteConfigMark(id value, NSString *key) {
-    if (!value || LVRemoteConfigMarked(value)) return;
-    @synchronized (LVRemoteConfigValueClass) {
-        static BOOL logged;
-        if (LVRemoteConfigMarked(value)) return;
-        BOOL original = NO;
-        @try { original = [(id<LVRemoteConfigValueReading>)value boolValue]; }
-        @catch (__unused NSException *e) { }
-        objc_setAssociatedObject(value, &LVRemoteConfigMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (!logged) {
-            logged = YES;
-            LVLog([NSString stringWithFormat:@"rc override key=%@ original=%d", key, original ? 1 : 0]);
-        }
-    }
-}
+
 // Replace a getter only on the class that implements it (owned methods), like LVInstallOne.
 static void LVRemoteConfigInstallGetter(Class cls, SEL selector, BOOL ownedOnly) {
     Method method = NULL;
