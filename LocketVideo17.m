@@ -6,6 +6,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <unistd.h>
 #import <sys/stat.h>
 #import <math.h>
