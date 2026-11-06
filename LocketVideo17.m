@@ -723,54 +723,50 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
         [LVInstalled addObject:key];
     }
 }
+static id LVForcedConfigValue(void) {
+    Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
+    if (!valueClass) return nil;
+    SEL initSel = @selector(initWithData:source:);
+    if (![valueClass instancesRespondToSelector:initSel]) return nil;
+    NSData *one = [@"1" dataUsingEncoding:NSUTF8StringEncoding];
+    id value = [valueClass alloc];
+    return ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(value, initSel, one, 1);
+}
 static void LVInstallRemoteConfigOverrides(void) {
     static BOOL installed;
     if (installed) return;
     @try {
-        if (!LVInstalled) LVInstalled = [NSMutableSet set];
         Class rc = NSClassFromString(@"FIRRemoteConfig");
         Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
-        if (!rc) {
-            LVLog(@"rc FIRRemoteConfig absent");
+        if (!rc || !valueClass) {
+            LVLog(@"rc class absent");
             return;
         }
-        LVLog([NSString stringWithFormat:@"rc class %@", NSStringFromClass(rc)]);
-        if (valueClass) {
-            LVRemoteConfigValueClass = valueClass;
-            LVRemoteConfigInstallGetter(valueClass, @selector(boolValue), NO);
-            LVRemoteConfigInstallGetter(valueClass, @selector(stringValue), NO);
-            LVRemoteConfigInstallGetter(valueClass, @selector(numberValue), NO);
-        }
-        // Log every key the app actually reads, and force the two video/mic gates.
-        SEL sub = @selector(objectForKeyedSubscript:);
-        Method method = class_getInstanceMethod(rc, sub);
-        if (!method) method = class_getInstanceMethod(rc, @selector(configValueForKey:));
-        if (!method) {
-            LVLog(@"rc no config reader");
-            return;
-        }
-        SEL selector = method_getName(method);
-        IMP original = method_getImplementation(method);
-        IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
-            id value = ((id (*)(id, SEL, id))original)(config, selector, name);
-            @try {
-                if ([name isKindOfClass:NSString.class]) {
-                    static NSUInteger logged;
-                    if (logged < 40) {
-                        logged++;
-                        LVLog([NSString stringWithFormat:@"rc read %@", name]);
-                    }
-                    if (LVRemoteConfigWantedKey(name) && value) {
-                        LVRemoteConfigForceClass(value);
-                        LVRemoteConfigMarkAny(value, name);
+        // Same mechanism as LocketFull6 on 2.69: replace the returned value object
+        // with one built from @"1", instead of marking the server object.
+        SEL selectors[] = {@selector(configValueForKey:), @selector(objectForKeyedSubscript:)};
+        NSUInteger hooked = 0;
+        for (unsigned i = 0; i < 2; i++) {
+            SEL selector = selectors[i];
+            Method method = class_getInstanceMethod(rc, selector);
+            if (!method) continue;
+            IMP original = method_getImplementation(method);
+            IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
+                if (LVRemoteConfigWantedKey(name)) {
+                    id forced = LVForcedConfigValue();
+                    if (forced) {
+                        static BOOL logged;
+                        if (!logged) { logged = YES; LVLog([NSString stringWithFormat:@"rc force %@", name]); }
+                        return forced;
                     }
                 }
-            } @catch (__unused NSException *e) { }
-            return value;
-        });
-        class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
-        installed = YES;
-        LVLog(@"rc reader hooked");
+                return ((id (*)(id, SEL, id))original)(config, selector, name);
+            });
+            class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
+            hooked++;
+        }
+        installed = hooked > 0;
+        LVLog([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
     } @catch (__unused NSException *e) {
         LVLog(@"rc install exception");
     }
