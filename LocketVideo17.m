@@ -799,31 +799,23 @@ static void LVInstallCameraGates(void) {
         }
     };
     SEL appear = @selector(viewDidAppear:);
-    for (Class cls in @[camera ?: NSNull.null, recorder ?: NSNull.null]) {
-        if ((id)cls == NSNull.null) continue;
-        Method method = class_getInstanceMethod(cls, appear);
-        if (!method && cls == recorder) {
-            // Recorder is not a view controller. Force on init-family is unsafe; use a timer once.
-            continue;
+    if (camera) {
+        Method method = class_getInstanceMethod(camera, appear);
+        if (method) {
+            IMP original = method_getImplementation(method);
+            IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
+                force(self);
+                ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
+            });
+            class_replaceMethod(camera, appear, replacement, method_getTypeEncoding(method));
+            LVLog([NSString stringWithFormat:@"camera hooked %@", NSStringFromClass(camera)]);
         }
-        if (!method) continue;
-        IMP original = method_getImplementation(method);
-        IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
-            force(self);
-            ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
-        });
-        class_replaceMethod(cls, appear, replacement, method_getTypeEncoding(method));
-        LVLog([NSString stringWithFormat:@"camera hooked %@", NSStringFromClass(cls)]);
     }
     if (recorder) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            unsigned n = 0;
-            // Walk live objects is not available. Log that recorder class exists so the next step is clear.
-            LVLog([NSString stringWithFormat:@"recorder class %@", NSStringFromClass(recorder)]);
-            (void)n;
-        });
+        LVLog([NSString stringWithFormat:@"recorder class %@", NSStringFromClass(recorder)]);
     }
 }
+__attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
         // Only the authorized Locket main executable, never extensions or unrelated apps.
         NSString *executable = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleExecutable"];
