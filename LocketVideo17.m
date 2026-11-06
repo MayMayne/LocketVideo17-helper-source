@@ -788,12 +788,16 @@ static void LVInstallCameraGates(void) {
     void (^force)(id) = ^(id obj) {
         if (!obj) return;
         @try {
-            [obj setValue:@YES forKey:@"microphoneEnabled"];
-            [obj setValue:@YES forKey:@"microphoneButtonEnabled"];
-            [obj setValue:@YES forKey:@"microphoneConfigured"];
-            [obj setValue:@YES forKey:@"cameraRollVideoUploadEnabled"];
-            [obj setValue:@YES forKey:@"longerVideosEnabled"];
-            LVLog([NSString stringWithFormat:@"camera forced %@", NSStringFromClass([obj class])]);
+            for (NSString *key in @[
+                @"microphoneEnabled", @"_microphoneEnabled",
+                @"microphoneButtonEnabled", @"_microphoneButtonEnabled",
+                @"microphoneConfigured", @"_microphoneConfigured",
+                @"cameraRollVideoUploadEnabled", @"_cameraRollVideoUploadEnabled",
+                @"longerVideosEnabled", @"_longerVideosEnabled"]) {
+                @try { [obj setValue:@YES forKey:key];
+                    LVLog([NSString stringWithFormat:@"set %@ on %@", key, NSStringFromClass([obj class])]);
+                } @catch (__unused NSException *e) { }
+            }
         } @catch (NSException *e) {
             LVLog([NSString stringWithFormat:@"camera kvc %@ %@", NSStringFromClass([obj class]), e.reason]);
         }
@@ -805,6 +809,12 @@ static void LVInstallCameraGates(void) {
             IMP original = method_getImplementation(method);
             IMP replacement = imp_implementationWithBlock(^(id self, BOOL animated) {
                 force(self);
+            id recorderObj = nil;
+            @try { recorderObj = [self valueForKey:@"recorder"]; } @catch (__unused NSException *e) { }
+            if (!recorderObj) {
+                @try { recorderObj = [self valueForKey:@"_recorder"]; } @catch (__unused NSException *e) { }
+            }
+            if (recorderObj) force(recorderObj);
                 ((void (*)(id, SEL, BOOL))original)(self, appear, animated);
             });
             class_replaceMethod(camera, appear, replacement, method_getTypeEncoding(method));
@@ -812,7 +822,18 @@ static void LVInstallCameraGates(void) {
         }
     }
     if (recorder) {
-        LVLog([NSString stringWithFormat:@"recorder class %@", NSStringFromClass(recorder)]);
+        // Swift stored properties are often KVC as _name, not name. Try both on the recorder class
+        // by swizzling a method that runs while an instance exists is not available here.
+        // Force via associated observation is unsafe. Log ivars so the next patch writes the right offset.
+        unsigned n = 0;
+        Ivar *ivars = class_copyIvarList(recorder, &n);
+        NSMutableString *names = [NSMutableString string];
+        for (unsigned i = 0; i < n && i < 24; i++) {
+            const char *nm = ivar_getName(ivars[i]);
+            if (nm) [names appendFormat:@" %s", nm];
+        }
+        free(ivars);
+        LVLog([NSString stringWithFormat:@"recorder ivars%@", names]);
     }
 }
 __attribute__((constructor)) static void LV17Load(void) {
