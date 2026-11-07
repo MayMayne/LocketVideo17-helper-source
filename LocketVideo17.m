@@ -483,9 +483,8 @@ static void LVExport(AVAssetExportSession *session, SEL selector, LVCompletion c
         job.state = AVAssetExportSessionStatusWaiting;
         objc_setAssociatedObject(session, &LVJobKey, job, OBJC_ASSOCIATION_RETAIN);
     }
-    // These reflect the real helper operation; the reader/writer never uses the 6 MB limit.
-    session.timeRange = CMTimeRangeMake(kCMTimeZero, duration);
-    session.fileLengthLimit = 0;
+    // Do not assign timeRange/fileLengthLimit here: both setters are swizzled and re-enter
+    // LVFullVideo while the app is mid-upload, which crashed on video upload.
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         if (!job.outputURL.isFileURL || !job.fileType) {
             [job complete:nil error:LVError(50, @"A matching .mp4, .mov or .m4v local output URL/container is required.")];
