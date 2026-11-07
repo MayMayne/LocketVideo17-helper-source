@@ -613,6 +613,28 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
         }];
     [task resume];
 }
+// Log the moment-post call so a failed upload can be told apart from a rejected post.
+static void LVInstallPostHook(void) {
+    static BOOL done;
+    if (done) return;
+    done = YES;
+    Class f = NSClassFromString(@"GTMSessionFetcher");
+    SEL sel = NSSelectorFromString(@"startWithCompletionHandler:");
+    Method m = f ? class_getInstanceMethod(f, sel) : NULL;
+    if (!m) return;
+    IMP o = method_getImplementation(m);
+    IMP r = imp_implementationWithBlock(^(id fetcher, id completion) {
+        @try {
+            id req = [fetcher valueForKey:@"request"];
+            NSString *url = [[[req URL] absoluteString] ?: @"" lowercaseString];
+            if ([url containsString:@"postmoment"] || [url containsString:@"api.locketcamera.com"]) {
+                LVLog([NSString stringWithFormat:@"post %@", [req URL].path ?: url]);
+            }
+        } @catch (__unused NSException *e) { }
+        ((void (*)(id, SEL, id))o)(fetcher, sel, completion);
+    });
+    class_replaceMethod(f, sel, r, method_getTypeEncoding(m));
+}
 static void LVInstallUploaderChunkHook(void) {
     static BOOL tried;
     // Log every HTTP response the Firebase uploader receives: status line only, no body.
@@ -929,6 +951,7 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVInstallClasses();
         LVInstallUploaderChunkHook();
         LVInstallRemoteConfigOverrides();
+        LVInstallPostHook();
         LVInstallCameraGates();
         LVInstallMicButton();
         dispatch_async(dispatch_get_main_queue(), ^{
