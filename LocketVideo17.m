@@ -627,10 +627,10 @@ static Class LVRemoteConfigValueClass;
 static char LVRemoteConfigMarkerKey;
 static BOOL LVRemoteConfigWantedKey(NSString *key) {
     if (![key isKindOfClass:NSString.class]) return NO;
-    // Same five keys LocketFull6 forces on 2.69.
+    // Mic + upload + sound. camera_roll_preview_enabled is left alone: forcing it
+    // made the library fail with "Không thể tải các mục".
     return [key isEqualToString:@"internal_camera_roll_video_upload_enabled"] ||
            [key isEqualToString:@"camera_microphone_enabled"] ||
-           [key isEqualToString:@"camera_roll_preview_enabled"] ||
            [key isEqualToString:@"video_sound_enabled"] ||
            [key isEqualToString:@"sound_enabled"];
 }
