@@ -683,9 +683,9 @@ static void LVInstallUploaderChunkHook(void) {
             @catch (__unused NSException *e) { }
             LVLog([NSString stringWithFormat:@"up start chunk=%ld len=%lld %@",
                    (long)chunk, (long long)length, url]);
-            // Never exceed 32 MiB: INT64_MAX broke the uploader (chunk=9223372036854775807).
+            // Fixed 32 MiB. Setting chunk == full length broke the resumable protocol: the
+            // app must send X-Goog-Upload-Offset chunks, not one oversized request.
             int64_t target = 0x2000000;
-            if (length > 0 && length < target) target = length;
             if (chunk != target) {
                 [fetcher setValue:@(target) forKey:@"chunkSize"];
                 LVLog([NSString stringWithFormat:@"up chunk=%lld", (long long)target]);
