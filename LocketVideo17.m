@@ -21,6 +21,7 @@ static NSMutableSet<NSString *> *LVInstalled;
 static BOOL LVEnabled;
 
 typedef void (^LVCompletion)(void);
+static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL));
 typedef void (^LVFetchCompletion)(NSData *data, NSURLResponse *response, NSError *error);
 static NSError *LVError(NSInteger code, NSString *message) {
     return [NSError errorWithDomain:@"LocketVideo17" code:code
@@ -146,6 +147,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             // Never overwrite or remove an existing app-owned output.
             if (![NSFileManager.defaultManager moveItemAtURL:temporary toURL:_outputURL error:&moveError])
                 error = LVError(21, @"Cannot publish the export (output must not already exist).");
+            else
+                LVDirectUpload(_outputURL, nil);
         }
         _failure = error;
         _state = _cancelled ? AVAssetExportSessionStatusCancelled :
@@ -228,21 +231,14 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            // The server rejects videos above roughly 10 MB, so aim under 9.4 MB.
-            // Encode with a byte budget computed from the duration; retry lower on overshoot.
-            static const int64_t kSafeBytes = 9400000;
-            double seconds = CMTimeGetSeconds(_duration);
+            // No re-encode budget: keep source quality. The direct upload path posts the file
+            // with the app's own Firebase token instead of going through the app uploader.
+            NSInteger rate = LVSourceVideoRate(_asset);
             BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
-            NSInteger audioRate = audio ? 64000 : 0;
-            double reserve = fmax(300000.0, seconds * 200.0);
-            double total = (double)kSafeBytes - reserve;
-            NSInteger baseRate = (NSInteger)floor(total * 8.0 / seconds) - audioRate;
-            if (baseRate < 20000) baseRate = 20000;
+            NSInteger audioRate = audio ? 128000 : 0;
             BOOL preferHEVC = YES;
-            for (NSUInteger attempt = 0; attempt < 4; attempt++) {
+            for (NSUInteger attempt = 0; attempt < 2; attempt++) {
                 if (self.isCancelled) { [self complete:nil error:nil]; return; }
-                NSInteger rate = (NSInteger)(baseRate * pow(0.68, (double)attempt));
-                if (rate < 16000) rate = 16000;
                 BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:preferHEVC attempt:attempt error:&error];
                 if (!ok && preferHEVC && !self.isCancelled) {
                     LVLog(@"HEVC failed; retry H264");
@@ -250,13 +246,11 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                     preferHEVC = NO;
                     ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:attempt error:&error];
                 }
-                int64_t bytes = LVSize(temp);
-                if (ok && bytes > 0 && bytes <= kSafeBytes && [self validate:temp error:&error]) {
-                    LVLog([NSString stringWithFormat:@"budget ok bytes=%lld", (long long)bytes]);
+                if (ok && [self validate:temp error:&error]) {
                     [self complete:temp error:nil]; return;
                 }
                 LVLog([NSString stringWithFormat:@"retry attempt=%lu bytes=%lld code=%ld",
-                       (unsigned long)attempt, (long long)bytes, (long)error.code]);
+                       (unsigned long)attempt, (long long)LVSize(temp), (long)error.code]);
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
             [self complete:nil error:error ?: LVError(33, @"Cannot produce a valid full-length video output.")];
@@ -588,11 +582,68 @@ static void LVInstallClasses(void) {
         LVLog([NSString stringWithFormat:@"installed methods=%lu", (unsigned long)LVInstalled.count]);
     }
 }
+static __strong NSString *LVFirebaseToken;
+static void LVStoreToken(NSString *token) {
+    if (token.length < 20) return;
+    @synchronized ([NSObject class]) {
+        if (![token isEqualToString:LVFirebaseToken]) {
+            LVFirebaseToken = [token copy];
+            LVLog(@"token captured");
+        }
+    }
+}
+// Direct upload: POST the whole file to Firebase Storage, then let the app post the moment.
+// Runs only after a successful export, using the token the app itself sent.
+static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
+    NSString *token;
+    @synchronized ([NSObject class]) { token = [LVFirebaseToken copy]; }
+    if (!token) { LVLog(@"direct upload: no token"); if (done) done(nil); return; }
+    UIDevice *dev = nil; (void)dev;
+    NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4",
+                      @"self", NSUUID.UUID.UUIDString];
+    NSString *encoded = [name stringByAddingPercentEncodingWithAllowedCharacters:
+                         NSCharacterSet.URLQueryAllowedCharacterSet];
+    NSString *url = [NSString stringWithFormat:
+                     @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=media&name=%@", encoded];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+    req.HTTPMethod = @"POST";
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"video/mp4" forHTTPHeaderField:@"Content-Type"];
+    req.timeoutInterval = 300;
+    NSURLSessionUploadTask *task = [NSURLSession.sharedSession uploadTaskWithRequest:req fromFile:fileURL
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            NSInteger code = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+            LVLog([NSString stringWithFormat:@"direct upload code=%ld err=%ld bytes=%lu",
+                   (long)code, (long)err.code, (unsigned long)data.length]);
+            if (done) done(code == 200 ? @"ok" : nil);
+        }];
+    [task resume];
+}
 static void LVInstallUploaderChunkHook(void) {
     static BOOL tried;
     if (tried) return;
     tried = YES;
-    // Optional private dependency: absent means uploads simply keep Apple's chunk size.
+    // Capture the app's Firebase ID token from outgoing Storage requests, so the direct
+    // uploader can authenticate as the same user without any extra login.
+    Class fetcherClass = NSClassFromString(@"GTMSessionFetcher");
+    SEL startSel = NSSelectorFromString(@"startWithCompletionHandler:");
+    Method startMethod = fetcherClass ? class_getInstanceMethod(fetcherClass, startSel) : NULL;
+    if (startMethod) {
+        IMP originalStart = method_getImplementation(startMethod);
+        IMP startReplacement = imp_implementationWithBlock(^(id fetcher, id completion) {
+            @try {
+                id request = [fetcher valueForKey:@"request"];
+                if ([request isKindOfClass:NSClassFromString(@"NSURLRequest")]) {
+                    NSString *auth = [(NSURLRequest *)request valueForHTTPHeaderField:@"Authorization"];
+                    if (auth.length > 7) {
+                        LVStoreToken([auth substringFromIndex:7]);
+                    }
+                }
+            } @catch (__unused NSException *e) { }
+            ((void (*)(id, SEL, id))originalStart)(fetcher, startSel, completion);
+        });
+        class_replaceMethod(fetcherClass, startSel, startReplacement, method_getTypeEncoding(startMethod));
+    }
     Class uploader = NSClassFromString(@"GTMSessionUploadFetcher");
     SEL selector = @selector(beginFetchWithCompletionHandler:);
     Method method = uploader ? class_getInstanceMethod(uploader, selector) : NULL;
