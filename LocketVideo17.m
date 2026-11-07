@@ -770,8 +770,6 @@ static void LVInstallRemoteConfigOverrides(void) {
             class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
             hooked++;
         }
-        }
-        free(all);
         installed = YES;
         LVLog([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
     } @catch (__unused NSException *e) {
