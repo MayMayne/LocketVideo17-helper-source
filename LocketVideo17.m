@@ -759,11 +759,11 @@ static void LVInstallRemoteConfigOverrides(void) {
             IMP original = method_getImplementation(method);
             IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
                 if (LVRemoteConfigWantedKey(name)) {
+                    LVLog([NSString stringWithFormat:@"rc force %@ recv=%@", name, NSStringFromClass([config class])]);
+                    // Dictionary receivers (2.71.2 config snapshot) need a plain value.
+                    if ([config isKindOfClass:NSDictionary.class]) return @YES;
                     id forced = LVForcedConfigValue();
-                    if (forced) {
-                        LVLog([NSString stringWithFormat:@"rc force %@ as %@", name, NSStringFromClass([forced class])]);
-                        return forced;
-                    }
+                    if (forced) return forced;
                 }
                 return ((id (*)(id, SEL, id))original)(config, selector, name);
             });
