@@ -193,20 +193,24 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     // the app attached a passthrough videoComposition. Re-encoding a 4 MB clip produced 9 MB.
     if (![_asset isKindOfClass:AVURLAsset.class]) return NO;
     NSURL *url = ((AVURLAsset *)_asset).URL;
+    LVLog([NSString stringWithFormat:@"copy? src=%@ ext=%@ out=%@ type=%@ file=%@",
+           url.path.lastPathComponent, url.pathExtension, _outputURL.pathExtension,
+           _fileType, url.isFileURL ? @"y" : @"n"]);
     if (!url.isFileURL || [url isEqual:_outputURL]) return NO;
     int64_t size = LVSize(url);
-    if (size <= 0) return NO;
+    if (size <= 0) { LVLog(@"copy no: size"); return NO; }
     NSFileHandle *h = [NSFileHandle fileHandleForReadingFromURL:url error:NULL];
     NSData *head = [h readDataOfLength:12];
     [h closeFile];
     if (head.length < 12) return NO;
     const uint8_t *b = head.bytes;
-    if (memcmp(b + 4, "ftyp", 4) != 0) return NO;
+    if (memcmp(b + 4, "ftyp", 4) != 0) { LVLog(@"copy no: no ftyp"); return NO; }
     BOOL qt = memcmp(b + 8, "qt  ", 4) == 0;
     NSString *ext = url.pathExtension.lowercaseString;
     BOOL compatible = (qt && [_fileType isEqualToString:AVFileTypeQuickTimeMovie] && [ext isEqualToString:@"mov"]) ||
         (!qt && [_fileType isEqualToString:AVFileTypeMPEG4] && [ext isEqualToString:@"mp4"]) ||
         (!qt && [_fileType isEqualToString:AVFileTypeAppleM4V] && [ext isEqualToString:@"m4v"]);
+    if (!compatible) LVLog(@"copy no: container mismatch");
     if (compatible && source) *source = url;
     return compatible;
 }
