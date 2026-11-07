@@ -591,17 +591,21 @@ static void LVInstallUploaderChunkHook(void) {
     IMP original = method_getImplementation(method);
     __block IMP originalIMP = original;
     IMP replacement = imp_implementationWithBlock(^(id fetcher, LVFetchCompletion completion) {
-        static BOOL raised;
         @synchronized(uploader) {
-            if (!raised && [fetcher respondsToSelector:@selector(chunkSize)]) {
+            if ([fetcher respondsToSelector:@selector(chunkSize)]) {
                 @try {
                     NSInteger chunk = [[fetcher valueForKey:@"chunkSize"] integerValue];
-                    // 16 MiB: large enough to cut round-trips, small enough to avoid the
-                    // memory pressure that crashed large uploads at 32 MiB.
-                    if (chunk >= 1 && chunk < 0x1000000) {
-                        [fetcher setValue:@(0x1000000) forKey:@"chunkSize"];
-                        raised = YES;
-                        LVLog([NSString stringWithFormat:@"chunk %ld->%d", (long)chunk, 0x1000000]);
+                    int64_t length = -1;
+                    if ([fetcher respondsToSelector:NSSelectorFromString(@"fullUploadLength")])
+                        length = (int64_t)[[fetcher valueForKey:@"fullUploadLength"] longLongValue];
+                    if (length <= 0 && [fetcher respondsToSelector:@selector(uploadFileURL)])
+                        length = LVSize([fetcher valueForKey:@"uploadFileURL"]);
+                    // One request for the whole file: set the chunk to the full upload length.
+                    int64_t target = length > 0 ? length : 0x8000000;
+                    if (chunk >= 1 && target > chunk) {
+                        [fetcher setValue:@(target) forKey:@"chunkSize"];
+                        LVLog([NSString stringWithFormat:@"chunk %ld->%lld length=%lld",
+                               (long)chunk, (long long)target, (long long)length]);
                     }
                 } @catch (__unused NSException *e) { }
             }
