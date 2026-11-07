@@ -596,36 +596,17 @@ static void LVInstallUploaderChunkHook(void) {
             if (!raised && [fetcher respondsToSelector:@selector(chunkSize)]) {
                 @try {
                     NSInteger chunk = [[fetcher valueForKey:@"chunkSize"] integerValue];
-                    if (chunk >= 1 && chunk < 0x2000000) {
-                        [fetcher setValue:@(0x2000000) forKey:@"chunkSize"];
+                    // 16 MiB: large enough to cut round-trips, small enough to avoid the
+                    // memory pressure that crashed large uploads at 32 MiB.
+                    if (chunk >= 1 && chunk < 0x1000000) {
+                        [fetcher setValue:@(0x1000000) forKey:@"chunkSize"];
                         raised = YES;
-                        int64_t length = -1;
-                        if ([fetcher respondsToSelector:@selector(uploadFileURL)])
-                            length = LVSize([fetcher valueForKey:@"uploadFileURL"]);
-                        if (length < 0 && [fetcher respondsToSelector:@selector(uploadData)])
-                            length = (int64_t)[[fetcher valueForKey:@"uploadData"] length];
-                        LVLog([NSString stringWithFormat:@"chunk %ld->%d length=%lld", (long)chunk,
-                               (int)0x2000000, (long long)length]);
+                        LVLog([NSString stringWithFormat:@"chunk %ld->%d", (long)chunk, 0x1000000]);
                     }
                 } @catch (__unused NSException *e) { }
             }
         }
-        LVFetchCompletion wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
-            @try {
-                NSInteger code = 0;
-                id us = @"-";
-                if ([response isKindOfClass:NSHTTPURLResponse.class]) {
-                    NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
-                    code = http.statusCode;
-                    id h = [http allHeaderFields][@"X-Goog-Upload-Status"];
-                    if (h) us = h;
-                }
-                LVLog([NSString stringWithFormat:@"upload code=%ld us=%@ err=%ld", (long)code,
-                       us, (long)error.code]);
-            } @catch (__unused NSException *e) { }
-            if (completion) completion(data, response, error);
-        };
-        ((void (*)(id, SEL, LVFetchCompletion))originalIMP)(fetcher, selector, wrapped);
+        ((void (*)(id, SEL, LVFetchCompletion))originalIMP)(fetcher, selector, completion);
     });
     class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
 }
