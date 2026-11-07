@@ -836,25 +836,6 @@ static void LVInstallCameraGates(void) {
     }
 }
 static void LVInstallMicButton(void) {
-    Class session = AVCaptureSession.class;
-    SEL add = @selector(addInput:);
-    Method method = class_getInstanceMethod(session, add);
-    if (!method) return;
-    IMP original = method_getImplementation(method);
-    IMP replacement = imp_implementationWithBlock(^(AVCaptureSession *self, AVCaptureInput *input) {
-        ((void (*)(id, SEL, id))original)(self, add, input);
-        if (![input isKindOfClass:AVCaptureDeviceInput.class]) return;
-        if (![((AVCaptureDeviceInput *)input).device hasMediaType:AVMediaTypeVideo]) return;
-        AVCaptureDevice *mic = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio];
-        NSError *err = nil;
-        AVCaptureDeviceInput *ain = mic ? [AVCaptureDeviceInput deviceInputWithDevice:mic error:&err] : nil;
-        if (ain && [self canAddInput:ain]) {
-            ((void (*)(id, SEL, id))original)(self, add, ain);
-            LVLog(@"mic input added");
-        }
-    });
-    class_replaceMethod(session, add, replacement, method_getTypeEncoding(method));
-    LVLog(@"mic hook on");
 }
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
