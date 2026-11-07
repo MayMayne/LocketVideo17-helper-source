@@ -627,9 +627,12 @@ static Class LVRemoteConfigValueClass;
 static char LVRemoteConfigMarkerKey;
 static BOOL LVRemoteConfigWantedKey(NSString *key) {
     if (![key isKindOfClass:NSString.class]) return NO;
+    // Same five keys LocketFull6 forces on 2.69.
     return [key isEqualToString:@"internal_camera_roll_video_upload_enabled"] ||
            [key isEqualToString:@"camera_microphone_enabled"] ||
-           [key isEqualToString:@"camera_roll_video_upload_enabled"];
+           [key isEqualToString:@"camera_roll_preview_enabled"] ||
+           [key isEqualToString:@"video_sound_enabled"] ||
+           [key isEqualToString:@"sound_enabled"];
 }
 static BOOL LVRemoteConfigMarked(id value) {
     return value && objc_getAssociatedObject(value, &LVRemoteConfigMarkerKey) != nil;
