@@ -683,9 +683,12 @@ static void LVInstallUploaderChunkHook(void) {
             @catch (__unused NSException *e) { }
             LVLog([NSString stringWithFormat:@"up start chunk=%ld len=%lld %@",
                    (long)chunk, (long long)length, url]);
-            if (chunk >= 1 && length > chunk) {
-                [fetcher setValue:@(length) forKey:@"chunkSize"];
-                LVLog([NSString stringWithFormat:@"up chunk=%lld", (long long)length]);
+            // Never exceed 32 MiB: INT64_MAX broke the uploader (chunk=9223372036854775807).
+            int64_t target = 0x2000000;
+            if (length > 0 && length < target) target = length;
+            if (chunk != target) {
+                [fetcher setValue:@(target) forKey:@"chunkSize"];
+                LVLog([NSString stringWithFormat:@"up chunk=%lld", (long long)target]);
             }
         } @catch (__unused NSException *e) { }
         ((void (*)(id, SEL, LVFetchCompletion))original)(fetcher, selector, completion);
