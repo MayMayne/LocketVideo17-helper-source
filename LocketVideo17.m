@@ -770,6 +770,25 @@ static void LVInstallRemoteConfigOverrides(void) {
             class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
             hooked++;
         }
+        // 2.71.2 also reads flags from config dictionaries (log shows __NSDictionaryI receiver).
+        // Hook the concrete dictionary classes' subscript so those reads answer YES too.
+        Class dicts[] = { NSClassFromString(@"__NSDictionaryI"), NSClassFromString(@"__NSDictionaryM"),
+                          NSClassFromString(@"__NSSingleEntryDictionaryI"), NSDictionary.class };
+        for (unsigned d = 0; d < 4; d++) {
+            Class cls = dicts[d];
+            Method owned = NULL;
+            if (!cls || !LVOwnsSelector(cls, @selector(objectForKeyedSubscript:), &owned)) continue;
+            IMP imp = method_getImplementation(owned);
+            IMP rep = imp_implementationWithBlock(^id(id dict, id key) {
+                if (LVRemoteConfigWantedKey(key)) {
+                    LVLog([NSString stringWithFormat:@"dict force %@", key]);
+                    return @YES;
+                }
+                return ((id (*)(id, SEL, id))imp)(dict, @selector(objectForKeyedSubscript:), key);
+            });
+            class_replaceMethod(cls, @selector(objectForKeyedSubscript:), rep, method_getTypeEncoding(owned));
+            hooked++;
+        }
         installed = YES;
         LVLog([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
     } @catch (__unused NSException *e) {
