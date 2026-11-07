@@ -749,42 +749,27 @@ static void LVInstallRemoteConfigOverrides(void) {
         }
         // Same mechanism as LocketFull6 on 2.69: replace the returned value object
         // with one built from @"1", instead of marking the server object.
-        SEL selectors[] = {
-            @selector(configValueForKey:),
-            @selector(objectForKeyedSubscript:),
-            NSSelectorFromString(@"configValueForKey:source:"),
-            NSSelectorFromString(@"remoteConfigValueForKey:")
-        };
         NSUInteger hooked = 0;
-        unsigned n = 0;
-        Class *all = objc_copyClassList(&n);
-        for (unsigned c = 0; c < n; c++) {
-            for (unsigned i = 0; i < 4; i++) {
-                SEL selector = selectors[i];
-                Method method = class_getInstanceMethod(all[c], selector);
-                if (!method) continue;
-                // Only the class that owns the method, but include Swift subclasses that
-                // inherit FIRRemoteConfig's reader — those are the 2.71.2 path.
-                Class owner = class_getSuperclass(all[c]);
-                Method owned = NULL;
-                BOOL owns = LVOwnsSelector(all[c], selector, &owned);
-                if (!owns && owner != rc && all[c] != rc) continue;
-                if (!owns) method = class_getInstanceMethod(rc, selector);
-                if (!method) continue;
-                IMP original = method_getImplementation(method);
-                IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
-                    if (LVRemoteConfigWantedKey(name)) {
-                        id forced = LVForcedConfigValue();
-                        if (forced) {
-                            LVLog([NSString stringWithFormat:@"rc force %@ %@", name, NSStringFromClass([config class])]);
-                            return forced;
-                        }
+        // Only FIRRemoteConfig itself. Dictionary subscripts are unrelated and caused false hits.
+        SEL selectors[] = { @selector(configValueForKey:), @selector(objectForKeyedSubscript:) };
+        for (unsigned i = 0; i < 2; i++) {
+            SEL selector = selectors[i];
+            Method method = class_getInstanceMethod(rc, selector);
+            if (!method) continue;
+            IMP original = method_getImplementation(method);
+            IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
+                if (LVRemoteConfigWantedKey(name)) {
+                    id forced = LVForcedConfigValue();
+                    if (forced) {
+                        LVLog([NSString stringWithFormat:@"rc force %@ as %@", name, NSStringFromClass([forced class])]);
+                        return forced;
                     }
-                    return ((id (*)(id, SEL, id))original)(config, selector, name);
-                });
-                class_replaceMethod(all[c], selector, replacement, method_getTypeEncoding(method));
-                hooked++;
-            }
+                }
+                return ((id (*)(id, SEL, id))original)(config, selector, name);
+            });
+            class_replaceMethod(rc, selector, replacement, method_getTypeEncoding(method));
+            hooked++;
+        }
         }
         free(all);
         installed = YES;
