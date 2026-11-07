@@ -228,16 +228,21 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            // Quality-oriented re-encode; no byte budget and no shrinking ladder. Copy handles
-            // every compatible local file regardless of size, so this path is only for rendering.
-            NSInteger rate = LVSourceVideoRate(_asset);
+            // The server rejects videos above roughly 10 MB, so aim under 9.4 MB.
+            // Encode with a byte budget computed from the duration; retry lower on overshoot.
+            static const int64_t kSafeBytes = 9400000;
+            double seconds = CMTimeGetSeconds(_duration);
             BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
-            NSInteger audioRate = audio ? 128000 : 0; // 128 kbps AAC, channels capped at 2 in encode.
-            // iOS has no public VTIsHardwareEncodeSupported API. Probe with writer settings/start;
-            // any unsupported HEVC encoder retries the identical full-duration job as H.264.
+            NSInteger audioRate = audio ? 64000 : 0;
+            double reserve = fmax(300000.0, seconds * 200.0);
+            double total = (double)kSafeBytes - reserve;
+            NSInteger baseRate = (NSInteger)floor(total * 8.0 / seconds) - audioRate;
+            if (baseRate < 20000) baseRate = 20000;
             BOOL preferHEVC = YES;
-            for (NSUInteger attempt = 0; attempt < 2; attempt++) {
+            for (NSUInteger attempt = 0; attempt < 4; attempt++) {
                 if (self.isCancelled) { [self complete:nil error:nil]; return; }
+                NSInteger rate = (NSInteger)(baseRate * pow(0.68, (double)attempt));
+                if (rate < 16000) rate = 16000;
                 BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:preferHEVC attempt:attempt error:&error];
                 if (!ok && preferHEVC && !self.isCancelled) {
                     LVLog(@"HEVC failed; retry H264");
@@ -245,11 +250,13 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                     preferHEVC = NO;
                     ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:attempt error:&error];
                 }
-                if (ok && [self validate:temp error:&error]) {
+                int64_t bytes = LVSize(temp);
+                if (ok && bytes > 0 && bytes <= kSafeBytes && [self validate:temp error:&error]) {
+                    LVLog([NSString stringWithFormat:@"budget ok bytes=%lld", (long long)bytes]);
                     [self complete:temp error:nil]; return;
                 }
-                LVLog([NSString stringWithFormat:@"retry attempt=%lu code=%ld bytes=%lld", (unsigned long)attempt,
-                       (long)error.code, (long long)LVSize(temp)]);
+                LVLog([NSString stringWithFormat:@"retry attempt=%lu bytes=%lld code=%ld",
+                       (unsigned long)attempt, (long long)bytes, (long)error.code]);
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
             [self complete:nil error:error ?: LVError(33, @"Cannot produce a valid full-length video output.")];
@@ -279,9 +286,11 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         if (w < 2 || h < 2 || !isfinite(w) || !isfinite(h)) {
             if (error) *error = LVError(41, @"Invalid video dimensions."); return NO;
         }
-        // Preserve source resolution; the render path targets quality, not bytes.
-        renderSize = CGSizeMake(MAX(2, (NSInteger)floor(w / 2) * 2),
-                                MAX(2, (NSInteger)floor(h / 2) * 2));
+        // Scale down when the byte budget is tight, so long videos stay under the server cap.
+        NSInteger maxEdge = rate < 90000 ? 480 : (rate < 200000 ? 640 : (rate < 400000 ? 720 : 1080));
+        CGFloat scale = fmin(1.0, (CGFloat)maxEdge / fmax(w, h));
+        renderSize = CGSizeMake(MAX(2, (NSInteger)floor(w * scale / 2) * 2),
+                                MAX(2, (NSInteger)floor(h * scale / 2) * 2));
         CGFloat sx = renderSize.width / w, sy = renderSize.height / h;
         CGAffineTransform t = track.preferredTransform;
         CGAffineTransform normalized = CGAffineTransformMake(t.a * sx, t.b * sy, t.c * sx, t.d * sy,
