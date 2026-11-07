@@ -207,9 +207,13 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     if (memcmp(b + 4, "ftyp", 4) != 0) { LVLog(@"copy no: no ftyp"); return NO; }
     BOOL qt = memcmp(b + 8, "qt  ", 4) == 0;
     NSString *ext = url.pathExtension.lowercaseString;
-    BOOL compatible = (qt && [_fileType isEqualToString:AVFileTypeQuickTimeMovie] && [ext isEqualToString:@"mov"]) ||
-        (!qt && [_fileType isEqualToString:AVFileTypeMPEG4] && [ext isEqualToString:@"mp4"]) ||
-        (!qt && [_fileType isEqualToString:AVFileTypeAppleM4V] && [ext isEqualToString:@"m4v"]);
+    // MP4 and MOV share the ISO base media container; copying .mov bytes into a .mp4 target is
+    // valid and avoids a re-encode that tripled the file size.
+    BOOL iso = qt || [_fileType isEqualToString:AVFileTypeMPEG4] ||
+               [_fileType isEqualToString:AVFileTypeQuickTimeMovie] ||
+               [_fileType isEqualToString:AVFileTypeAppleM4V];
+    BOOL compatible = iso && ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] ||
+                              [ext isEqualToString:@"m4v"]);
     if (!compatible) LVLog(@"copy no: container mismatch");
     if (compatible && source) *source = url;
     return compatible;
