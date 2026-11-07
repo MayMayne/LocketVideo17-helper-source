@@ -235,9 +235,12 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             NSURL *source;
             if ([self canCopy:&source]) {
                 LVLog(@"copy compatible original");
+                int64_t srcBytes = LVSize(source);
                 if (![NSFileManager.defaultManager copyItemAtURL:source toURL:temp error:&error]) {
                     [self complete:nil error:LVError(23, @"Cannot copy the source video.")]; return;
                 }
+                LVLog([NSString stringWithFormat:@"copied src=%lld dst=%lld",
+                       (long long)srcBytes, (long long)LVSize(temp)]);
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
