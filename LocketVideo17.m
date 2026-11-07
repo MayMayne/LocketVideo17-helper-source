@@ -241,29 +241,10 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            // No re-encode budget: keep source quality. The direct upload path posts the file
-            // with the app's own Firebase token instead of going through the app uploader.
-            NSInteger rate = LVSourceVideoRate(_asset);
-            BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
-            NSInteger audioRate = audio ? 128000 : 0;
-            BOOL preferHEVC = YES;
-            for (NSUInteger attempt = 0; attempt < 2; attempt++) {
-                if (self.isCancelled) { [self complete:nil error:nil]; return; }
-                BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:preferHEVC attempt:attempt error:&error];
-                if (!ok && preferHEVC && !self.isCancelled) {
-                    LVLog(@"HEVC failed; retry H264");
-                    [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
-                    preferHEVC = NO;
-                    ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:attempt error:&error];
-                }
-                if (ok && [self validate:temp error:&error]) {
-                    [self complete:temp error:nil]; return;
-                }
-                LVLog([NSString stringWithFormat:@"retry attempt=%lu bytes=%lld code=%ld",
-                       (unsigned long)attempt, (long long)LVSize(temp), (long)error.code]);
-                [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
-            }
-            [self complete:nil error:error ?: LVError(33, @"Cannot produce a valid full-length video output.")];
+            // Copy only. Re-encoding tripled the size, so an unsupported container fails
+            // with a clear message instead of silently producing a bloated file.
+            LVLog(@"unsupported container; refusing to re-encode");
+            [self complete:nil error:LVError(60, @"This video format cannot be sent. Use MP4 or MOV.")];
         } @catch (__unused NSException *e) {
             [self complete:nil error:LVError(24, @"AVFoundation raised an exception while exporting.")];
         }
