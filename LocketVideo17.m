@@ -189,7 +189,9 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     return YES;
 }
 - (BOOL)canCopy:(NSURL **)source {
-    if (![_asset isKindOfClass:AVURLAsset.class] || _videoComposition || _audioMix) return NO;
+    // Skip export entirely: copy the original bytes whenever the container matches, even when
+    // the app attached a passthrough videoComposition. Re-encoding a 4 MB clip produced 9 MB.
+    if (![_asset isKindOfClass:AVURLAsset.class]) return NO;
     NSURL *url = ((AVURLAsset *)_asset).URL;
     if (!url.isFileURL || [url isEqual:_outputURL]) return NO;
     int64_t size = LVSize(url);
@@ -691,6 +693,25 @@ static void LVInstallUploaderChunkHook(void) {
                 LVLog([NSString stringWithFormat:@"up chunk=%lld", (long long)target]);
             }
         } @catch (__unused NSException *e) { }
+        // Log the outcome by polling the fetcher after it finishes; no completion wrapping,
+        // which previously crashed the app during upload.
+        __weak id weakFetcher = fetcher;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            id f = weakFetcher;
+            if (!f) return;
+            @try {
+                id resp = [f valueForKey:@"response"];
+                if ([resp isKindOfClass:NSClassFromString(@"NSHTTPURLResponse")]) {
+                    NSHTTPURLResponse *h = resp;
+                    id us = [h allHeaderFields][@"X-Goog-Upload-Status"];
+                    LVLog([NSString stringWithFormat:@"http code=%ld us=%@",
+                           (long)h.statusCode, us ?: @"-"]);
+                } else if (resp) {
+                    LVLog([NSString stringWithFormat:@"resp class=%@", NSStringFromClass([resp class])]);
+                }
+            } @catch (__unused NSException *e) { }
+        });
         ((void (*)(id, SEL, LVFetchCompletion))original)(fetcher, selector, completion);
     });
     class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
