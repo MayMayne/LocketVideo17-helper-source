@@ -621,6 +621,27 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
 }
 static void LVInstallUploaderChunkHook(void) {
     static BOOL tried;
+    // Log every HTTP response the Firebase uploader receives: status line only, no body.
+    if (!tried) {
+        Class f = NSClassFromString(@"GTMSessionFetcher");
+        SEL resp = NSSelectorFromString(@"setResponse:");
+        Method m = f ? class_getInstanceMethod(f, resp) : NULL;
+        if (m) {
+            IMP o = method_getImplementation(m);
+            IMP r = imp_implementationWithBlock(^(id self, NSURLResponse *response) {
+                @try {
+                    NSInteger code = [response isKindOfClass:NSHTTPURLResponse.class]
+                        ? ((NSHTTPURLResponse *)response).statusCode : 0;
+                    NSString *us = nil;
+                    if ([response isKindOfClass:NSHTTPURLResponse.class])
+                        us = ((NSHTTPURLResponse *)response).allHeaderFields[@"X-Goog-Upload-Status"];
+                    LVLog([NSString stringWithFormat:@"http code=%ld us=%@", (long)code, us ?: @"-"]);
+                } @catch (__unused NSException *e) { }
+                ((void (*)(id, SEL, id))o)(self, resp, response);
+            });
+            class_replaceMethod(f, resp, r, method_getTypeEncoding(m));
+        }
+    }
     if (tried) return;
     tried = YES;
     // Capture the app's Firebase ID token from outgoing Storage requests, so the direct
@@ -649,28 +670,25 @@ static void LVInstallUploaderChunkHook(void) {
     Method method = uploader ? class_getInstanceMethod(uploader, selector) : NULL;
     if (!method) return;
     IMP original = method_getImplementation(method);
-    __block IMP originalIMP = original;
     IMP replacement = imp_implementationWithBlock(^(id fetcher, LVFetchCompletion completion) {
-        @synchronized(uploader) {
-            if ([fetcher respondsToSelector:@selector(chunkSize)]) {
-                @try {
-                    NSInteger chunk = [[fetcher valueForKey:@"chunkSize"] integerValue];
-                    int64_t length = -1;
-                    if ([fetcher respondsToSelector:NSSelectorFromString(@"fullUploadLength")])
-                        length = (int64_t)[[fetcher valueForKey:@"fullUploadLength"] longLongValue];
-                    if (length <= 0 && [fetcher respondsToSelector:@selector(uploadFileURL)])
-                        length = LVSize([fetcher valueForKey:@"uploadFileURL"]);
-                    // One request for the whole file: set the chunk to the full upload length.
-                    int64_t target = length > 0 ? length : 0x8000000;
-                    if (chunk >= 1 && target > chunk) {
-                        [fetcher setValue:@(target) forKey:@"chunkSize"];
-                        LVLog([NSString stringWithFormat:@"chunk %ld->%lld length=%lld",
-                               (long)chunk, (long long)target, (long long)length]);
-                    }
-                } @catch (__unused NSException *e) { }
+        @try {
+            NSInteger chunk = 0;
+            int64_t length = -1;
+            if ([fetcher respondsToSelector:@selector(chunkSize)])
+                chunk = [[fetcher valueForKey:@"chunkSize"] integerValue];
+            if ([fetcher respondsToSelector:NSSelectorFromString(@"fullUploadLength")])
+                length = (int64_t)[[fetcher valueForKey:@"fullUploadLength"] longLongValue];
+            NSString *url = @"?";
+            @try { url = [[[fetcher valueForKey:@"request"] URL] absoluteString] ?: @"?"; }
+            @catch (__unused NSException *e) { }
+            LVLog([NSString stringWithFormat:@"up start chunk=%ld len=%lld %@",
+                   (long)chunk, (long long)length, url]);
+            if (chunk >= 1 && length > chunk) {
+                [fetcher setValue:@(length) forKey:@"chunkSize"];
+                LVLog([NSString stringWithFormat:@"up chunk=%lld", (long long)length]);
             }
-        }
-        ((void (*)(id, SEL, LVFetchCompletion))originalIMP)(fetcher, selector, completion);
+        } @catch (__unused NSException *e) { }
+        ((void (*)(id, SEL, LVFetchCompletion))original)(fetcher, selector, completion);
     });
     class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
 }
