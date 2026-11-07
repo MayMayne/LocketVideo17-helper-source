@@ -610,7 +610,22 @@ static void LVInstallUploaderChunkHook(void) {
                 } @catch (__unused NSException *e) { }
             }
         }
-        ((void (*)(id, SEL, LVFetchCompletion))originalIMP)(fetcher, selector, completion);
+        LVFetchCompletion wrapped = ^(NSData *data, NSURLResponse *response, NSError *error) {
+            @try {
+                NSInteger code = 0;
+                id us = @"-";
+                if ([response isKindOfClass:NSHTTPURLResponse.class]) {
+                    NSHTTPURLResponse *http = (NSHTTPURLResponse *)response;
+                    code = http.statusCode;
+                    id h = [http allHeaderFields][@"X-Goog-Upload-Status"];
+                    if (h) us = h;
+                }
+                LVLog([NSString stringWithFormat:@"upload code=%ld us=%@ err=%ld", (long)code,
+                       us, (long)error.code]);
+            } @catch (__unused NSException *e) { }
+            if (completion) completion(data, response, error);
+        };
+        ((void (*)(id, SEL, LVFetchCompletion))originalIMP)(fetcher, selector, wrapped);
     });
     class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
 }
