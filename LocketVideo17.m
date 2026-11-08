@@ -799,11 +799,17 @@ static void LVInstallUploaderChunkHook(void) {
                 NSString *cl = [req valueForHTTPHeaderField:@"Content-Length"];
                 NSString *ac = [req valueForHTTPHeaderField:@"X-Firebase-AppCheck"];
                 NSString *auth = [req valueForHTTPHeaderField:@"Authorization"];
-                // 2.69 works on the same server with the same file size, and it does not send
-                // App Check. Strip the App Check header so 2.71.2 looks like 2.69 to Storage.
-                if (ac.length > 0 && [req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
-                    [(NSMutableURLRequest *)req setValue:nil forHTTPHeaderField:@"X-Firebase-AppCheck"];
-                    LVLog(@"appcheck stripped");
+                // The working web uploader sends these two headers; Storage may require them.
+                if ([req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
+                    NSMutableURLRequest *mreq = (NSMutableURLRequest *)req;
+                    if ([mreq valueForHTTPHeaderField:@"X-Ios-Bundle-Identifier"].length == 0) {
+                        [mreq setValue:@"com.locket.Locket" forHTTPHeaderField:@"X-Ios-Bundle-Identifier"];
+                    }
+                    if ([mreq valueForHTTPHeaderField:@"User-Agent"].length == 0) {
+                        [mreq setValue:@"FirebaseFunctions/10.20.0 iOS/17.4 com.locket.Locket"
+                     forHTTPHeaderField:@"User-Agent"];
+                    }
+                    LVLog(@"ios hdr added");
                 }
                 LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
                        cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
