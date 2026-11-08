@@ -665,6 +665,23 @@ static BOOL LVFetchTokenNow(void) {
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
     return LVTok.length > 20;
 }
+// The web uploader takes uid from the JWT claim user_id / sub, which can differ from
+// FIRUser.uid. Storage rules key on the token claim, so use the claim.
+static NSString *LVUIDFromToken(NSString *token) {
+    NSArray *parts = [token componentsSeparatedByString:@"."];
+    if (parts.count < 2) return nil;
+    NSString *b64 = parts[1];
+    while (b64.length % 4) b64 = [b64 stringByAppendingString:@"="];
+    b64 = [b64 stringByReplacingOccurrencesOfString:@"-" withString:@"+"];
+    b64 = [b64 stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
+    NSData *d = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+    if (!d) return nil;
+    NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+    if (![j isKindOfClass:NSDictionary.class]) return nil;
+    NSString *u = j[@"user_id"] ?: j[@"sub"];
+    LVLog([NSString stringWithFormat:@"jwt user_id=%@ sub=%@", j[@"user_id"] ?: @"-", j[@"sub"] ?: @"-"]);
+    return [u isKindOfClass:NSString.class] ? u : nil;
+}
 static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
     NSString *key = NSUUID.UUID.UUIDString;
     NSDictionary *data = @{
@@ -723,7 +740,10 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
     if (!token && LVFetchTokenNow()) {
         @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
     }
-    if (!token || !uid) { LVLog(@"direct: no token"); if (done) done(nil); return; }
+    if (!token) { LVLog(@"direct: no token"); if (done) done(nil); return; }
+    NSString *claimUID = LVUIDFromToken(token);
+    if (claimUID.length) uid = claimUID;
+    if (!uid) { LVLog(@"direct: no uid"); if (done) done(nil); return; }
 
     NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4", uid, NSUUID.UUID.UUIDString];
     NSString *enc = [name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
