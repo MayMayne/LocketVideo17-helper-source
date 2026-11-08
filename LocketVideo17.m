@@ -637,98 +637,32 @@ static void LVInstallPostHook(void) {
 }
 static void LVInstallUploaderChunkHook(void) {
     static BOOL tried;
-    // Log every HTTP response the Firebase uploader receives: status line only, no body.
-    if (!tried) {
-        Class f = NSClassFromString(@"GTMSessionFetcher");
-        SEL resp = NSSelectorFromString(@"setResponse:");
-        Method m = f ? class_getInstanceMethod(f, resp) : NULL;
-        if (m) {
-            IMP o = method_getImplementation(m);
-            IMP r = imp_implementationWithBlock(^(id self, NSURLResponse *response) {
-                @try {
-                    NSInteger code = [response isKindOfClass:NSHTTPURLResponse.class]
-                        ? ((NSHTTPURLResponse *)response).statusCode : 0;
-                    NSString *us = nil;
-                    if ([response isKindOfClass:NSHTTPURLResponse.class])
-                        us = ((NSHTTPURLResponse *)response).allHeaderFields[@"X-Goog-Upload-Status"];
-                    LVLog([NSString stringWithFormat:@"http code=%ld us=%@", (long)code, us ?: @"-"]);
-                } @catch (__unused NSException *e) { }
-                ((void (*)(id, SEL, id))o)(self, resp, response);
-            });
-            class_replaceMethod(f, resp, r, method_getTypeEncoding(m));
-        }
-    }
     if (tried) return;
     tried = YES;
-    // Capture the app's Firebase ID token from outgoing Storage requests, so the direct
-    // uploader can authenticate as the same user without any extra login.
-    Class fetcherClass = NSClassFromString(@"GTMSessionFetcher");
-    SEL startSel = NSSelectorFromString(@"startWithCompletionHandler:");
-    Method startMethod = fetcherClass ? class_getInstanceMethod(fetcherClass, startSel) : NULL;
-    if (startMethod) {
-        IMP originalStart = method_getImplementation(startMethod);
-        IMP startReplacement = imp_implementationWithBlock(^(id fetcher, id completion) {
-            @try {
-                id request = [fetcher valueForKey:@"request"];
-                if ([request isKindOfClass:NSClassFromString(@"NSURLRequest")]) {
-                    NSString *auth = [(NSURLRequest *)request valueForHTTPHeaderField:@"Authorization"];
-                    if (auth.length > 7) {
-                        LVStoreToken([auth substringFromIndex:7]);
-                    }
-                }
-            } @catch (__unused NSException *e) { }
-            ((void (*)(id, SEL, id))originalStart)(fetcher, startSel, completion);
-        });
-        class_replaceMethod(fetcherClass, startSel, startReplacement, method_getTypeEncoding(startMethod));
-    }
-    Class uploader = NSClassFromString(@"GTMSessionUploadFetcher");
-    SEL selector = @selector(beginFetchWithCompletionHandler:);
-    Method method = uploader ? class_getInstanceMethod(uploader, selector) : NULL;
-    if (!method) return;
-    IMP original = method_getImplementation(method);
-    IMP replacement = imp_implementationWithBlock(^(id fetcher, LVFetchCompletion completion) {
+    // Do NOT touch chunkSize: the binary patch already removed the 10 MiB clamp, and
+    // writing chunkSize after the fetcher started broke its offset bookkeeping, so it
+    // uploaded a chunk (us=active) but never sent upload,finalize.
+    // Instead, log exactly what the uploader sends so the stop point is visible.
+    Class f = NSClassFromString(@"GTMSessionFetcher");
+    SEL setReq = NSSelectorFromString(@"setRequest:");
+    Method m = f ? class_getInstanceMethod(f, setReq) : NULL;
+    if (!m) return;
+    IMP o = method_getImplementation(m);
+    IMP r = imp_implementationWithBlock(^(id self, id req) {
         @try {
-            NSInteger chunk = 0;
-            int64_t length = -1;
-            if ([fetcher respondsToSelector:@selector(chunkSize)])
-                chunk = [[fetcher valueForKey:@"chunkSize"] integerValue];
-            if ([fetcher respondsToSelector:NSSelectorFromString(@"fullUploadLength")])
-                length = (int64_t)[[fetcher valueForKey:@"fullUploadLength"] longLongValue];
-            NSString *url = @"?";
-            @try { url = [[[fetcher valueForKey:@"request"] URL] absoluteString] ?: @"?"; }
-            @catch (__unused NSException *e) { }
-            LVLog([NSString stringWithFormat:@"up start chunk=%ld len=%lld %@",
-                   (long)chunk, (long long)length, url]);
-            // Fixed 32 MiB. Setting chunk == full length broke the resumable protocol: the
-            // app must send X-Goog-Upload-Offset chunks, not one oversized request.
-            int64_t target = 0x2000000;
-            if (chunk != target) {
-                [fetcher setValue:@(target) forKey:@"chunkSize"];
-                LVLog([NSString stringWithFormat:@"up chunk=%lld", (long long)target]);
+            NSString *url = [[[req URL] absoluteString] ?: @"" lowercaseString];
+            if ([url containsString:@"firebasestorage"] || [url containsString:@"storage.googleapis"]) {
+                NSString *cmd = [req valueForHTTPHeaderField:@"X-Goog-Upload-Command"];
+                NSString *off = [req valueForHTTPHeaderField:@"X-Goog-Upload-Offset"];
+                NSString *len = [req valueForHTTPHeaderField:@"X-Goog-Upload-Content-Length"];
+                NSString *cl = [req valueForHTTPHeaderField:@"Content-Length"];
+                LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@",
+                       cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod]]);
             }
         } @catch (__unused NSException *e) { }
-        // Log the outcome by polling the fetcher after it finishes; no completion wrapping,
-        // which previously crashed the app during upload.
-        __weak id weakFetcher = fetcher;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            id f = weakFetcher;
-            if (!f) return;
-            @try {
-                id resp = [f valueForKey:@"response"];
-                if ([resp isKindOfClass:NSClassFromString(@"NSHTTPURLResponse")]) {
-                    NSHTTPURLResponse *h = resp;
-                    id us = [h allHeaderFields][@"X-Goog-Upload-Status"];
-                    LVLog([NSString stringWithFormat:@"http code=%ld us=%@",
-                           (long)h.statusCode, us ?: @"-"]);
-                } else if (resp) {
-                    LVLog([NSString stringWithFormat:@"resp class=%@", NSStringFromClass([resp class])]);
-                }
-            } @catch (__unused NSException *e) { }
-        });
-        ((void (*)(id, SEL, LVFetchCompletion))original)(fetcher, selector, completion);
+        ((void (*)(id, SEL, id))o)(self, setReq, req);
     });
-    class_replaceMethod(uploader, selector, replacement, method_getTypeEncoding(method));
+    class_replaceMethod(f, setReq, r, method_getTypeEncoding(m));
 }
 // Remote Config feature gate override. Only the two named keys are affected. The object the
 // original -configValueForKey: returned is NEVER replaced: a marker is attached to that same
