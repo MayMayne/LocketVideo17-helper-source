@@ -799,24 +799,24 @@ static void LVInstallUploaderChunkHook(void) {
                 NSString *cl = [req valueForHTTPHeaderField:@"Content-Length"];
                 NSString *ac = [req valueForHTTPHeaderField:@"X-Firebase-AppCheck"];
                 NSString *auth = [req valueForHTTPHeaderField:@"Authorization"];
-                LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
-                       cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
-                       ac.length > 0, auth.length > 0]);
-            }
-                // Storage requests carried no Authorization at all (auth=0 in logs), so the
-                // upload never got an upload URL. Supply the token we already captured.
-                if (ac.length == 0) {
+                // Storage requests carry no Authorization (auth=0), so start is rejected and the
+                // app never gets an upload URL. Supply the token captured from FIRUser.
+                if (auth.length == 0 && [req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
                     NSString *tok = nil;
                     @synchronized ([NSObject class]) { tok = [LVTok copy]; }
                     if (!tok && LVFetchTokenNow()) {
                         @synchronized ([NSObject class]) { tok = [LVTok copy]; }
                     }
-                    if (tok.length > 20 && [req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
+                    if (tok.length > 20) {
                         [(NSMutableURLRequest *)req setValue:[NSString stringWithFormat:@"Bearer %@", tok]
                                            forHTTPHeaderField:@"Authorization"];
+                        auth = tok;
                         LVLog(@"auth injected");
                     }
                 }
+                LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
+                       cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
+                       ac.length > 0, auth.length > 0]);
             }
         } @catch (__unused NSException *e) { }
         ((void (*)(id, SEL, id))o)(self, setReq, req);
