@@ -690,6 +690,7 @@ static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSStri
 @end
 static LVUploader *LVKeepUploader;
 static NSURLSession *LVSession;
+static NSMutableArray *LVKeepTasks;
 
 static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
     NSString *token; NSString *uid;
@@ -735,12 +736,15 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
         if (done) done(videoURL);
     };
     LVKeepUploader = up;
-    if (!LVSession) {
-        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-        cfg.timeoutIntervalForResource = 1800;
-        LVSession = [NSURLSession sessionWithConfiguration:cfg delegate:up delegateQueue:nil];
-    }
-    NSURLSessionUploadTask *task = [LVSession uploadTaskWithRequest:req fromFile:fileURL];
+    if (!LVKeepTasks) LVKeepTasks = [NSMutableArray array];
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    cfg.timeoutIntervalForResource = 1800;
+    cfg.timeoutIntervalForRequest = 1800;
+    cfg.discretionary = NO;
+    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg delegate:up delegateQueue:nil];
+    LVSession = sess;
+    NSURLSessionUploadTask *task = [sess uploadTaskWithRequest:req fromFile:fileURL];
+    [LVKeepTasks addObject:task];
     LVLog([NSString stringWithFormat:@"media start %lld bytes", (long long)LVSize(fileURL)]);
     [task resume];
 }
