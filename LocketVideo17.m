@@ -588,52 +588,89 @@ static void LVStoreToken(NSString *token) {
 }
 // Direct upload: POST the whole file to Firebase Storage, then let the app post the moment.
 // Runs only after a successful export, using the token the app itself sent.
+static NSString *LVReadToken(void) {
+    // Firebase stores the signed-in user in the module's own defaults suite.
+    for (NSString *suite in @[@"firebase_auth", @"com.google.firebase.auth"]) {
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:suite];
+        NSDictionary *all = [d dictionaryRepresentation];
+        for (id k in all) {
+            id v = all[k];
+            if (![v isKindOfClass:NSDictionary.class]) continue;
+            NSDictionary *u = v;
+            NSString *t = u[@"access_token"] ?: u[@"accessToken"] ?: u[@"id_token"];
+            NSString *uid = u[@"user_id"] ?: u[@"uid"];
+            if (t.length > 20 && uid.length > 5) {
+                objc_setAssociatedObject([NSObject class], @selector(LVReadToken), uid, OBJC_ASSOCIATION_RETAIN);
+                return t;
+            }
+        }
+    }
+    return nil;
+}
+static NSString *LVUID(void) {
+    return objc_getAssociatedObject([NSObject class], @selector(LVReadToken));
+}
+static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
+    NSString *key = NSUUID.UUID.UUIDString;
+    NSDictionary *data = @{
+        @"video_url": videoURL ?: @"",
+        @"thumbnail_url": thumbURL ?: @"",
+        @"md5": [NSString stringWithFormat:@"%@_md5", key],
+        @"recipients": @[],
+        @"sent_to_all": @YES,
+        @"sent_to_self_only": @NO,
+        @"show_personally": @NO,
+        @"analytics": @{@"platform": @"ios", @"is_video_long": @YES}
+    };
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
+        [NSURL URLWithString:@"https://api.locketcamera.com/postMomentV2"]];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"data": data} options:0 error:NULL];
+    req.timeoutInterval = 120;
+    [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSInteger code = [r isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)r).statusCode : 0;
+        NSString *body = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"";
+        if (body.length > 200) body = [body substringToIndex:200];
+        LVLog([NSString stringWithFormat:@"postMomentV2 code=%ld err=%ld body=%@", (long)code, (long)e.code, body]);
+        if (done) done(code == 200);
+    }] resume];
+}
 static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
-    NSString *token;
-    @synchronized ([NSObject class]) { token = [LVFirebaseToken copy]; }
-    if (!token) { LVLog(@"direct upload: no token"); if (done) done(nil); return; }
-    UIDevice *dev = nil; (void)dev;
-    NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4",
-                      @"self", NSUUID.UUID.UUIDString];
-    NSString *encoded = [name stringByAddingPercentEncodingWithAllowedCharacters:
-                         NSCharacterSet.URLQueryAllowedCharacterSet];
+    NSString *token = LVReadToken();
+    NSString *uid = LVUID();
+    if (!token || !uid) {
+        LVLog([NSString stringWithFormat:@"direct upload: no token (token=%d uid=%d)",
+               token.length > 0, uid.length > 0]);
+        if (done) done(nil);
+        return;
+    }
+    LVLog([NSString stringWithFormat:@"direct upload uid=%@ len=%lld",
+           uid, (long long)LVSize(fileURL)]);
+    NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4", uid, NSUUID.UUID.UUIDString];
+    NSString *encoded = [name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
     NSString *url = [NSString stringWithFormat:
-                     @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=media&name=%@", encoded];
+        @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=media&name=%@", encoded];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     req.HTTPMethod = @"POST";
     [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     [req setValue:@"video/mp4" forHTTPHeaderField:@"Content-Type"];
-    req.timeoutInterval = 300;
-    NSURLSessionUploadTask *task = [NSURLSession.sharedSession uploadTaskWithRequest:req fromFile:fileURL
+    req.timeoutInterval = 600;
+    [[NSURLSession.sharedSession uploadTaskWithRequest:req fromFile:fileURL
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-            NSInteger code = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
-            LVLog([NSString stringWithFormat:@"direct upload code=%ld err=%ld bytes=%lu",
-                   (long)code, (long)err.code, (unsigned long)data.length]);
-            if (done) done(code == 200 ? @"ok" : nil);
-        }];
-    [task resume];
-}
-// Log the moment-post call so a failed upload can be told apart from a rejected post.
-static void LVInstallPostHook(void) {
-    static BOOL done;
-    if (done) return;
-    done = YES;
-    Class f = NSClassFromString(@"GTMSessionFetcher");
-    SEL sel = NSSelectorFromString(@"startWithCompletionHandler:");
-    Method m = f ? class_getInstanceMethod(f, sel) : NULL;
-    if (!m) return;
-    IMP o = method_getImplementation(m);
-    IMP r = imp_implementationWithBlock(^(id fetcher, id completion) {
-        @try {
-            id req = [fetcher valueForKey:@"request"];
-            NSString *url = [[[req URL] absoluteString] ?: @"" lowercaseString];
-            if ([url containsString:@"postmoment"] || [url containsString:@"api.locketcamera.com"]) {
-                LVLog([NSString stringWithFormat:@"post %@", [req URL].path ?: url]);
-            }
-        } @catch (__unused NSException *e) { }
-        ((void (*)(id, SEL, id))o)(fetcher, sel, completion);
-    });
-    class_replaceMethod(f, sel, r, method_getTypeEncoding(m));
+        NSInteger code = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
+        LVLog([NSString stringWithFormat:@"upload media code=%ld err=%ld bytes=%lu",
+               (long)code, (long)err.code, (unsigned long)data.length]);
+        if (code != 200) { if (done) done(nil); return; }
+        NSDictionary *meta = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+        NSString *dl = meta[@"downloadTokens"];
+        NSString *videoURL = [NSString stringWithFormat:
+            @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media&token=%@", encoded, dl ?: @""];
+        LVLog(@"upload ok, posting");
+        LVPost(videoURL, @"", uid, token, nil);
+        if (done) done(videoURL);
+    }] resume];
 }
 static void LVInstallUploaderChunkHook(void) {
     static BOOL tried;
