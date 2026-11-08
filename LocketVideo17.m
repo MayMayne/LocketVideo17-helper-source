@@ -685,7 +685,11 @@ static NSString *LVUIDFromToken(NSString *token) {
     NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
     if (![j isKindOfClass:NSDictionary.class]) return nil;
     NSString *u = j[@"user_id"] ?: j[@"sub"];
-    LVLog([NSString stringWithFormat:@"jwt user_id=%@ sub=%@", j[@"user_id"] ?: @"-", j[@"sub"] ?: @"-"]);
+    double exp = [j[@"exp"] doubleValue];
+    double iat = [j[@"iat"] doubleValue];
+    double now = NSDate.date.timeIntervalSince1970;
+    LVLog([NSString stringWithFormat:@"jwt uid=%@ exp_in=%.0fs iat=%.0f aud=%@ iss=%@",
+           u ?: @"-", exp - now, iat, j[@"aud"] ?: @"-", j[@"iss"] ?: @"-"]);
     return [u isKindOfClass:NSString.class] ? u : nil;
 }
 static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
