@@ -206,6 +206,9 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     const uint8_t *b = head.bytes;
     if (memcmp(b + 4, "ftyp", 4) != 0) { LVLog(@"copy no: no ftyp"); return NO; }
     BOOL qt = memcmp(b + 8, "qt  ", 4) == 0;
+    // The working uploader converts QuickTime ("ftypqt  ") to H.264 MP4 before upload;
+    // Storage rejects QuickTime in the video bucket. Only copy real ISO MP4.
+    if (qt) { LVLog(@"copy no: quicktime needs H264"); return NO; }
     NSString *ext = url.pathExtension.lowercaseString;
     // MP4 and MOV share the ISO base media container; copying .mov bytes into a .mp4 target is
     // valid and avoids a re-encode that tripled the file size.
@@ -244,10 +247,13 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            // Copy only. Re-encoding tripled the size, so an unsupported container fails
-            // with a clear message instead of silently producing a bloated file.
-            LVLog(@"unsupported container; refusing to re-encode");
-            [self complete:nil error:LVError(60, @"This video format cannot be sent. Use MP4 or MOV.")];
+            // QuickTime/HEVC must become H.264 MP4, exactly like the working web uploader does.
+            NSInteger rate = LVSourceVideoRate(_asset);
+            BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
+            NSInteger audioRate = audio ? 128000 : 0;
+            BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:0 error:&error];
+            if (ok && [self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
+            LVLog([NSString stringWithFormat:@"encode failed code=%ld", (long)error.code]);
         } @catch (__unused NSException *e) {
             [self complete:nil error:LVError(24, @"AVFoundation raised an exception while exporting.")];
         }
