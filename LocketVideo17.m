@@ -667,6 +667,30 @@ static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSStri
         if (done) done(code == 200);
     }] resume];
 }
+@interface LVUploader : NSObject <NSURLSessionDataDelegate>
+@property (nonatomic, strong) NSMutableData *body;
+@property (nonatomic, copy) void (^done)(NSInteger code, NSData *data, NSError *err);
+@end
+@implementation LVUploader
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didSendBodyData:(int64_t)b totalBytesSent:(int64_t)sent totalBytesExpectedToSend:(int64_t)exp {
+    static int64_t last;
+    if (sent - last > 1048576) {
+        last = sent;
+        LVLog([NSString stringWithFormat:@"up progress %lld/%lld", (long long)sent, (long long)exp]);
+    }
+}
+- (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)t didReceiveData:(NSData *)d {
+    if (d) [self.body appendData:d];
+}
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didCompleteWithError:(NSError *)e {
+    NSInteger code = [t.response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)t.response).statusCode : 0;
+    LVLog([NSString stringWithFormat:@"up complete code=%ld err=%ld bodylen=%lu", (long)code, (long)e.code, (unsigned long)self.body.length]);
+    if (self.done) self.done(code, self.body, e);
+}
+@end
+static LVUploader *LVKeepUploader;
+static NSURLSession *LVSession;
+
 static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
     NSString *token; NSString *uid;
     @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
@@ -689,22 +713,38 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
     req.HTTPMethod = @"POST";
     [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     [req setValue:@"video/mp4" forHTTPHeaderField:@"Content-Type"];
-    req.timeoutInterval = 600;
-    [[NSURLSession.sharedSession uploadTaskWithRequest:req fromFile:fileURL
-        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-        NSInteger code = [resp isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)resp).statusCode : 0;
-        LVLog([NSString stringWithFormat:@"upload media code=%ld err=%ld bytes=%lu",
-               (long)code, (long)err.code, (unsigned long)data.length]);
-        if (code != 200) { if (done) done(nil); return; }
+    req.timeoutInterval = 1800;
+    [req setValue:[NSString stringWithFormat:@"%lld", (long long)LVSize(fileURL)] forHTTPHeaderField:@"Content-Length"];
+
+    LVUploader *up = [LVUploader new];
+    up.body = [NSMutableData data];
+    up.done = ^(NSInteger code, NSData *data, NSError *err) {
+        if (code != 200 || !data.length) {
+            NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+            if (b.length > 200) b = [b substringToIndex:200];
+            LVLog([NSString stringWithFormat:@"media fail %@", b]);
+            if (done) done(nil);
+            return;
+        }
         NSDictionary *meta = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
         NSString *dl = meta[@"downloadTokens"];
         NSString *videoURL = [NSString stringWithFormat:
             @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media&token=%@", encoded, dl ?: @""];
-        LVLog(@"upload ok, posting");
+        LVLog(@"media ok, posting");
         LVPost(videoURL, @"", uid, token, nil);
         if (done) done(videoURL);
-    }] resume];
+    };
+    LVKeepUploader = up;
+    if (!LVSession) {
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForResource = 1800;
+        LVSession = [NSURLSession sessionWithConfiguration:cfg delegate:up delegateQueue:nil];
+    }
+    NSURLSessionUploadTask *task = [LVSession uploadTaskWithRequest:req fromFile:fileURL];
+    LVLog([NSString stringWithFormat:@"media start %lld bytes", (long long)LVSize(fileURL)]);
+    [task resume];
 }
+
 static void LVInstallPostHook(void) {
 }
 static void LVInstallUploaderChunkHook(void) {
