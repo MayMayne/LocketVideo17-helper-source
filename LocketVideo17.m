@@ -148,7 +148,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             if (![NSFileManager.defaultManager moveItemAtURL:temporary toURL:_outputURL error:&moveError])
                 error = LVError(21, @"Cannot publish the export (output must not already exist).");
             else
-                LVDirectUpload(_outputURL, nil);
+                LVLog(@"export done, letting the app upload");
         }
         _failure = error;
         _state = _cancelled ? AVAssetExportSessionStatusCancelled :
