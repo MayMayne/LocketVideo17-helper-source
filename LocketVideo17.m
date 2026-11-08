@@ -672,6 +672,8 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
         if (done) done(videoURL);
     }] resume];
 }
+static void LVInstallPostHook(void) {
+}
 static void LVInstallUploaderChunkHook(void) {
     static BOOL tried;
     if (tried) return;
