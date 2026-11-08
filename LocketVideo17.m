@@ -148,7 +148,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             if (![NSFileManager.defaultManager moveItemAtURL:temporary toURL:_outputURL error:&moveError])
                 error = LVError(21, @"Cannot publish the export (output must not already exist).");
             else
-                LVLog(@"export done, letting the app upload");
+                LVDirectUpload(_outputURL, nil);
         }
         _failure = error;
         _state = _cancelled ? AVAssetExportSessionStatusCancelled :
@@ -723,40 +723,36 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
     if (!token && LVFetchTokenNow()) {
         @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
     }
-    if (!token || !uid) {
-        LVLog([NSString stringWithFormat:@"direct upload: no token (token=%d uid=%d)",
-               token.length > 0, uid.length > 0]);
-        if (done) done(nil);
-        return;
-    }
-    LVLog([NSString stringWithFormat:@"direct upload uid=%@ len=%lld",
-           uid, (long long)LVSize(fileURL)]);
+    if (!token || !uid) { LVLog(@"direct: no token"); if (done) done(nil); return; }
+
     NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4", uid, NSUUID.UUID.UUIDString];
-    NSString *encoded = [name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
+    NSString *enc = [name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
     NSString *url = [NSString stringWithFormat:
-        @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=media&name=%@", encoded];
+        @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=media&name=%@", enc];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
     req.HTTPMethod = @"POST";
     [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
     [req setValue:@"video/mp4" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:@"com.locket.Locket" forHTTPHeaderField:@"X-Ios-Bundle-Identifier"];
+    [req setValue:@"FirebaseFunctions/10.20.0 iOS/17.4 com.locket.Locket" forHTTPHeaderField:@"User-Agent"];
     req.timeoutInterval = 1800;
-    [req setValue:[NSString stringWithFormat:@"%lld", (long long)LVSize(fileURL)] forHTTPHeaderField:@"Content-Length"];
 
     LVUploader *up = [LVUploader new];
     up.body = [NSMutableData data];
     up.done = ^(NSInteger code, NSData *data, NSError *err) {
-        if (code != 200 || !data.length) {
+        if (code < 200 || code >= 300 || !data.length) {
             NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
             if (b.length > 200) b = [b substringToIndex:200];
-            LVLog([NSString stringWithFormat:@"media fail %@", b]);
+            LVLog([NSString stringWithFormat:@"media fail code=%ld %@", (long)code, b]);
             if (done) done(nil);
             return;
         }
         NSDictionary *meta = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
-        NSString *dl = meta[@"downloadTokens"];
+        NSString *dl = [(meta[@"downloadTokens"] ?: @"") componentsSeparatedByString:@","].firstObject;
         NSString *videoURL = [NSString stringWithFormat:
-            @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media&token=%@", encoded, dl ?: @""];
-        LVLog(@"media ok, posting");
+            @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media", enc];
+        if (dl.length) videoURL = [videoURL stringByAppendingFormat:@"&token=%@", dl];
+        LVLog([NSString stringWithFormat:@"media ok %@", videoURL]);
         LVPost(videoURL, @"", uid, token, nil);
         if (done) done(videoURL);
     };
