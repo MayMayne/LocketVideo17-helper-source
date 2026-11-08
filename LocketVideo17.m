@@ -692,6 +692,39 @@ static NSString *LVUIDFromToken(NSString *token) {
            u ?: @"-", exp - now, iat, j[@"aud"] ?: @"-", j[@"iss"] ?: @"-"]);
     return [u isKindOfClass:NSString.class] ? u : nil;
 }
+static NSString *LVRefreshToken(void) {
+    // Same flow as the working web uploader: exchange refresh_token for a fresh id_token.
+    Class auth = NSClassFromString(@"FIRAuth");
+    if (!auth) return nil;
+    id inst = ((id (*)(id, SEL))objc_msgSend)(auth, NSSelectorFromString(@"auth"));
+    id user = inst ? ((id (*)(id, SEL))objc_msgSend)(inst, NSSelectorFromString(@"currentUser")) : nil;
+    if (!user) return nil;
+    NSString *rt = nil;
+    @try { rt = [user valueForKey:@"refreshToken"]; } @catch (__unused NSException *e) { }
+    if (rt.length < 20) { LVLog(@"no refresh token"); return nil; }
+    NSString *key = @"AIzaSyCQngaaXQIfJaH0aS2l7REgIjD7nL431So";
+    NSString *url = [NSString stringWithFormat:@"https://securetoken.googleapis.com/v1/token?key=%@", key];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    req.HTTPBody = [NSJSONSerialization dataWithJSONObject:
+        @{@"grant_type": @"refresh_token", @"refresh_token": rt} options:0 error:NULL];
+    req.timeoutInterval = 30;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSString *out = nil;
+    [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        @try {
+            NSInteger code = [r isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)r).statusCode : 0;
+            NSDictionary *j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
+            NSString *t = j[@"id_token"];
+            LVLog([NSString stringWithFormat:@"refresh code=%ld token=%d", (long)code, t.length > 0]);
+            if ([t isKindOfClass:NSString.class] && t.length > 20) out = t;
+        } @catch (__unused NSException *x) { }
+        dispatch_semaphore_signal(sem);
+    }] resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
+    return out;
+}
 static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
     NSString *key = NSUUID.UUID.UUIDString;
     NSDictionary *data = @{
@@ -750,6 +783,8 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
     if (!token && LVFetchTokenNow()) {
         @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
     }
+    NSString *fresh = LVRefreshToken();
+    if (fresh) token = fresh;
     if (!token) { LVLog(@"direct: no token"); if (done) done(nil); return; }
     NSString *claimUID = LVUIDFromToken(token);
     if (claimUID.length) uid = claimUID;
