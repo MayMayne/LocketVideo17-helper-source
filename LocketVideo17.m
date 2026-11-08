@@ -600,6 +600,31 @@ static void LVCapture(NSString *t, NSString *u) {
 }
 // Hook FIRUser token delivery: the SDK fetches the token for every upload, so this
 // captures the exact token the app is using without guessing where it is stored.
+static void LVInstallAppCheckHook(void) {
+    static BOOL done;
+    if (done) return;
+    done = YES;
+    Class ac = NSClassFromString(@"GACAppCheck");
+    if (!ac) { LVLog(@"appcheck class absent"); return; }
+    for (NSString *name in @[@"limitedUseTokenWithCompletion:", @"tokenWithCompletion:"]) {
+        SEL sel = NSSelectorFromString(name);
+        Method m = class_getInstanceMethod(ac, sel);
+        if (!m) continue;
+        IMP o = method_getImplementation(m);
+        IMP r = imp_implementationWithBlock(^(id self, void (^cb)(id, NSError *)) {
+            void (^wrap)(id, NSError *) = ^(id res, NSError *e) {
+                NSString *t = nil;
+                @try { t = [res valueForKey:@"token"]; } @catch (__unused NSException *x) { }
+                LVLog([NSString stringWithFormat:@"appcheck %@ token=%d err=%ld",
+                       name, t.length > 0, (long)e.code]);
+                if (cb) cb(res, e);
+            };
+            ((void (*)(id, SEL, id))o)(self, sel, wrap);
+        });
+        class_replaceMethod(ac, sel, r, method_getTypeEncoding(m));
+        LVLog([NSString stringWithFormat:@"appcheck hooked %@", name]);
+    }
+}
 static void LVInstallTokenHook(void) {
     static BOOL done;
     if (done) return;
@@ -1003,6 +1028,7 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVInstallRemoteConfigOverrides();
         LVInstallPostHook();
         LVInstallTokenHook();
+        LVInstallAppCheckHook();
         LVInstallCameraGates();
         LVInstallMicButton();
         dispatch_async(dispatch_get_main_queue(), ^{
