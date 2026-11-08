@@ -799,20 +799,11 @@ static void LVInstallUploaderChunkHook(void) {
                 NSString *cl = [req valueForHTTPHeaderField:@"Content-Length"];
                 NSString *ac = [req valueForHTTPHeaderField:@"X-Firebase-AppCheck"];
                 NSString *auth = [req valueForHTTPHeaderField:@"Authorization"];
-                // Storage requests carry no Authorization (auth=0), so start is rejected and the
-                // app never gets an upload URL. Supply the token captured from FIRUser.
-                if (auth.length == 0 && [req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
-                    NSString *tok = nil;
-                    @synchronized ([NSObject class]) { tok = [LVTok copy]; }
-                    if (!tok && LVFetchTokenNow()) {
-                        @synchronized ([NSObject class]) { tok = [LVTok copy]; }
-                    }
-                    if (tok.length > 20) {
-                        [(NSMutableURLRequest *)req setValue:[NSString stringWithFormat:@"Bearer %@", tok]
-                                           forHTTPHeaderField:@"Authorization"];
-                        auth = tok;
-                        LVLog(@"auth injected");
-                    }
+                // 2.69 works on the same server with the same file size, and it does not send
+                // App Check. Strip the App Check header so 2.71.2 looks like 2.69 to Storage.
+                if (ac.length > 0 && [req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
+                    [(NSMutableURLRequest *)req setValue:nil forHTTPHeaderField:@"X-Firebase-AppCheck"];
+                    LVLog(@"appcheck stripped");
                 }
                 LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
                        cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
