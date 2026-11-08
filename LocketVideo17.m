@@ -803,6 +803,21 @@ static void LVInstallUploaderChunkHook(void) {
                        cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
                        ac.length > 0, auth.length > 0]);
             }
+                // Storage requests carried no Authorization at all (auth=0 in logs), so the
+                // upload never got an upload URL. Supply the token we already captured.
+                if (ac.length == 0) {
+                    NSString *tok = nil;
+                    @synchronized ([NSObject class]) { tok = [LVTok copy]; }
+                    if (!tok && LVFetchTokenNow()) {
+                        @synchronized ([NSObject class]) { tok = [LVTok copy]; }
+                    }
+                    if (tok.length > 20 && [req isKindOfClass:NSClassFromString(@"NSMutableURLRequest")]) {
+                        [(NSMutableURLRequest *)req setValue:[NSString stringWithFormat:@"Bearer %@", tok]
+                                           forHTTPHeaderField:@"Authorization"];
+                        LVLog(@"auth injected");
+                    }
+                }
+            }
         } @catch (__unused NSException *e) { }
         ((void (*)(id, SEL, id))o)(self, setReq, req);
     });
