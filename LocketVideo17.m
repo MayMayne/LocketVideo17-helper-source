@@ -588,27 +588,57 @@ static void LVStoreToken(NSString *token) {
 }
 // Direct upload: POST the whole file to Firebase Storage, then let the app post the moment.
 // Runs only after a successful export, using the token the app itself sent.
-static NSString *LVReadToken(void) {
-    // Firebase stores the signed-in user in the module's own defaults suite.
-    for (NSString *suite in @[@"firebase_auth", @"com.google.firebase.auth"]) {
-        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:suite];
-        NSDictionary *all = [d dictionaryRepresentation];
-        for (id k in all) {
-            id v = all[k];
-            if (![v isKindOfClass:NSDictionary.class]) continue;
-            NSDictionary *u = v;
-            NSString *t = u[@"access_token"] ?: u[@"accessToken"] ?: u[@"id_token"];
-            NSString *uid = u[@"user_id"] ?: u[@"uid"];
-            if (t.length > 20 && uid.length > 5) {
-                objc_setAssociatedObject([NSObject class], @selector(LVReadToken), uid, OBJC_ASSOCIATION_RETAIN);
-                return t;
-            }
-        }
+static __strong NSString *LVTok;
+static __strong NSString *LVUid;
+static void LVCapture(NSString *t, NSString *u) {
+    if (t.length < 20) return;
+    @synchronized ([NSObject class]) {
+        LVTok = [t copy];
+        if (u.length > 5) LVUid = [u copy];
+        LVLog([NSString stringWithFormat:@"token captured uid=%@", LVUid ?: @"?"]);
     }
-    return nil;
 }
-static NSString *LVUID(void) {
-    return objc_getAssociatedObject([NSObject class], @selector(LVReadToken));
+// Hook FIRUser token delivery: the SDK fetches the token for every upload, so this
+// captures the exact token the app is using without guessing where it is stored.
+static void LVInstallTokenHook(void) {
+    static BOOL done;
+    if (done) return;
+    done = YES;
+    Class user = NSClassFromString(@"FIRUser");
+    SEL sel = NSSelectorFromString(@"getIDTokenForcingRefresh:completion:");
+    Method m = user ? class_getInstanceMethod(user, sel) : NULL;
+    if (!m) { LVLog(@"FIRUser token sel absent"); return; }
+    IMP o = method_getImplementation(m);
+    IMP r = imp_implementationWithBlock(^(id self, BOOL force, void (^cb)(NSString *, NSError *)) {
+        void (^wrap)(NSString *, NSError *) = ^(NSString *t, NSError *e) {
+            NSString *uid = nil;
+            @try { uid = [self valueForKey:@"uid"]; } @catch (__unused NSException *x) { }
+            LVCapture(t, uid);
+            if (cb) cb(t, e);
+        };
+        ((void (*)(id, SEL, BOOL, id))o)(self, sel, force, wrap);
+    });
+    class_replaceMethod(user, sel, r, method_getTypeEncoding(m));
+    LVLog(@"token hook on");
+}
+// Ask Firebase for a token synchronously when one was not captured yet.
+static BOOL LVFetchTokenNow(void) {
+    Class auth = NSClassFromString(@"FIRAuth");
+    if (!auth) return NO;
+    id inst = ((id (*)(id, SEL))objc_msgSend)(auth, NSSelectorFromString(@"auth"));
+    id user = inst ? ((id (*)(id, SEL))objc_msgSend)(inst, NSSelectorFromString(@"currentUser")) : nil;
+    if (!user) { LVLog(@"no current user"); return NO; }
+    NSString *uid = nil;
+    @try { uid = [user valueForKey:@"uid"]; } @catch (__unused NSException *e) { }
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    SEL sel = NSSelectorFromString(@"getIDTokenForcingRefresh:completion:");
+    if (![user respondsToSelector:sel]) return NO;
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(user, sel, NO, ^(NSString *t, NSError *e) {
+        LVCapture(t, uid);
+        dispatch_semaphore_signal(sem);
+    });
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
+    return LVTok.length > 20;
 }
 static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
     NSString *key = NSUUID.UUID.UUIDString;
@@ -638,8 +668,11 @@ static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSStri
     }] resume];
 }
 static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
-    NSString *token = LVReadToken();
-    NSString *uid = LVUID();
+    NSString *token; NSString *uid;
+    @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
+    if (!token && LVFetchTokenNow()) {
+        @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
+    }
     if (!token || !uid) {
         LVLog([NSString stringWithFormat:@"direct upload: no token (token=%d uid=%d)",
                token.length > 0, uid.length > 0]);
@@ -925,6 +958,7 @@ __attribute__((constructor)) static void LV17Load(void) {
         LVInstallUploaderChunkHook();
         LVInstallRemoteConfigOverrides();
         LVInstallPostHook();
+        LVInstallTokenHook();
         LVInstallCameraGates();
         LVInstallMicButton();
         dispatch_async(dispatch_get_main_queue(), ^{
