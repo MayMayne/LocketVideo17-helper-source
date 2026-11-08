@@ -797,8 +797,11 @@ static void LVInstallUploaderChunkHook(void) {
                 NSString *off = [req valueForHTTPHeaderField:@"X-Goog-Upload-Offset"];
                 NSString *len = [req valueForHTTPHeaderField:@"X-Goog-Upload-Content-Length"];
                 NSString *cl = [req valueForHTTPHeaderField:@"Content-Length"];
-                LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@",
-                       cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod]]);
+                NSString *ac = [req valueForHTTPHeaderField:@"X-Firebase-AppCheck"];
+                NSString *auth = [req valueForHTTPHeaderField:@"Authorization"];
+                LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
+                       cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
+                       ac.length > 0, auth.length > 0]);
             }
         } @catch (__unused NSException *e) { }
         ((void (*)(id, SEL, id))o)(self, setReq, req);
