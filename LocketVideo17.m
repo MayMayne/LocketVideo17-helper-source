@@ -219,7 +219,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     BOOL compatible = iso && ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] ||
                               [ext isEqualToString:@"m4v"]);
     if (!compatible) LVLog(@"copy no: container mismatch");
-    if (compatible && size > 6000000) { LVLog(@"copy no: over 6MB"); return NO; }
+    if (compatible && size > 6200000) { LVLog(@"copy no: over 6.2MB"); return NO; }
     if (compatible && source) *source = url;
     return compatible;
 }
@@ -263,8 +263,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             }
             // Server caps uploads at 6 MB. Only shrink when the file exceeds that, and aim
             // for 5.9 MB — shrinking further would throw away quality for nothing.
-            static const int64_t kCap = 6000000;
-            static const int64_t kTarget = 5900000;
+            static const int64_t kCap = 6200000;   // spec: re-encode above 6.2 MB
+            static const int64_t kTarget = 5900000;  // spec target; retry at 5.4 MB
             double secs = CMTimeGetSeconds(_duration);
             BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
             NSInteger audioRate = audio ? 64000 : 0;
@@ -759,30 +759,49 @@ static NSString *LVRefreshToken(void) {
     return out;
 }
 static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
-    NSString *key = NSUUID.UUID.UUIDString;
+    NSString *uuidHex = [[NSUUID.UUID.UUIDString stringByReplacingOccurrencesOfString:@"-" withString:@""] lowercaseString];
+    NSString *md5 = [NSString stringWithFormat:@"%@_%.0f", uuidHex, NSDate.date.timeIntervalSince1970];
+    NSString *install = [uuidHex substringToIndex:MIN(22, uuidHex.length)];
     NSDictionary *data = @{
-        @"video_url": videoURL ?: @"",
         @"thumbnail_url": thumbURL ?: @"",
-        @"md5": [NSString stringWithFormat:@"%@_md5", key],
-        @"recipients": @[],
-        @"sent_to_all": @YES,
+        @"video_url": videoURL ?: @"",
+        @"overlays": @[],
         @"sent_to_self_only": @NO,
-        @"show_personally": @NO,
-        @"analytics": @{@"platform": @"ios", @"is_video_long": @YES}
+        @"sent_to_all": @YES,
+        @"recipients": @[],
+        @"md5": md5,
+        @"analytics": @{
+            @"ios_version": @"2.68.0.2523",
+            @"experiments": @{
+                @"flag_18": @{@"@type": @"type.googleapis.com/google.protobuf.Int64Value", @"value": @"1203"},
+                @"flag_7":  @{@"@type": @"type.googleapis.com/google.protobuf.Int64Value", @"value": @"800"},
+                @"flag_10": @{@"@type": @"type.googleapis.com/google.protobuf.Int64Value", @"value": @"505"}
+            },
+            @"installation_id": install,
+            @"platform": @"ios"
+        }
     };
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:
         [NSURL URLWithString:@"https://api.locketcamera.com/postMomentV2"]];
     req.HTTPMethod = @"POST";
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"com.locket.Locket" forHTTPHeaderField:@"X-Ios-Bundle-Identifier"];
+    [req setValue:@"FirebaseFunctions/10.20.0 iOS/17.4 com.locket.Locket" forHTTPHeaderField:@"User-Agent"];
     req.HTTPBody = [NSJSONSerialization dataWithJSONObject:@{@"data": data} options:0 error:NULL];
     req.timeoutInterval = 120;
     [[NSURLSession.sharedSession dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         NSInteger code = [r isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)r).statusCode : 0;
         NSString *body = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"";
-        if (body.length > 200) body = [body substringToIndex:200];
-        LVLog([NSString stringWithFormat:@"postMomentV2 code=%ld err=%ld body=%@", (long)code, (long)e.code, body]);
-        if (done) done(code == 200);
+        if (body.length > 300) body = [body substringToIndex:300];
+        BOOL ok = NO;
+        if (code == 200 && d) {
+            NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL];
+            NSDictionary *res = j[@"result"];
+            ok = (res && !res[@"errors"]);
+        }
+        LVLog([NSString stringWithFormat:@"postMomentV2 code=%ld ok=%d body=%@", (long)code, ok, body]);
+        if (done) done(ok);
     }] resume];
 }
 @interface LVUploader : NSObject <NSURLSessionDataDelegate>
@@ -823,49 +842,84 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
     if (claimUID.length) uid = claimUID;
     if (!uid) { LVLog(@"direct: no uid"); if (done) done(nil); return; }
 
+    int64_t total = LVSize(fileURL);
     NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4", uid, NSUUID.UUID.UUIDString];
     NSString *enc = [name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
-    NSString *url = [NSString stringWithFormat:
-        @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=media&name=%@", enc];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
-    req.HTTPMethod = @"POST";
-    [req setValue:[NSString stringWithFormat:@"Bearer %@", token] forHTTPHeaderField:@"Authorization"];
-    [req setValue:@"video/mp4" forHTTPHeaderField:@"Content-Type"];
-    [req setValue:@"com.locket.Locket" forHTTPHeaderField:@"X-Ios-Bundle-Identifier"];
-    [req setValue:@"FirebaseFunctions/10.20.0 iOS/17.4 com.locket.Locket" forHTTPHeaderField:@"User-Agent"];
-    req.timeoutInterval = 1800;
+    NSString *startURL = [NSString stringWithFormat:
+        @"https://firebasestorage.googleapis.com/v0/b/locket-video/o?uploadType=resumable&name=%@", enc];
 
-    LVUploader *up = [LVUploader new];
-    up.body = [NSMutableData data];
-    up.done = ^(NSInteger code, NSData *data, NSError *err) {
-        if (code < 200 || code >= 300 || !data.length) {
-            NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
-            if (b.length > 200) b = [b substringToIndex:200];
-            LVLog([NSString stringWithFormat:@"media fail code=%ld %@", (long)code, b]);
+    NSMutableURLRequest *start = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:startURL]];
+    start.HTTPMethod = @"POST";
+    [start setValue:[NSString stringWithFormat:@"Firebase %@", token] forHTTPHeaderField:@"Authorization"];
+    [start setValue:@"application/json; charset=UTF-8" forHTTPHeaderField:@"Content-Type"];
+    [start setValue:@"resumable" forHTTPHeaderField:@"X-Goog-Upload-Protocol"];
+    [start setValue:@"start" forHTTPHeaderField:@"X-Goog-Upload-Command"];
+    [start setValue:@"video/mp4" forHTTPHeaderField:@"X-Goog-Upload-Content-Type"];
+    [start setValue:[NSString stringWithFormat:@"%lld", (long long)total]
+ forHTTPHeaderField:@"X-Goog-Upload-Content-Length"];
+    [start setValue:@"ios/12.12.1" forHTTPHeaderField:@"X-Firebase-Storage-Version"];
+    [start setValue:@"1:641029076083:ios:cc8eb46290d69b234fa606" forHTTPHeaderField:@"X-Firebase-Gmpid"];
+    [start setValue:@"com.locket.Locket" forHTTPHeaderField:@"X-Ios-Bundle-Identifier"];
+    [start setValue:@"FirebaseFunctions/10.20.0 iOS/17.4 com.locket.Locket" forHTTPHeaderField:@"User-Agent"];
+    start.timeoutInterval = 120;
+    NSDictionary *meta = @{
+        @"name": name,
+        @"contentType": @"video/mp4",
+        @"bucket": @"",
+        @"cacheControl": @"public, max-age=604800",
+        @"metadata": @{@"creator": uid, @"visibility": @"private"}
+    };
+    start.HTTPBody = [NSJSONSerialization dataWithJSONObject:meta options:0 error:NULL];
+    LVLog([NSString stringWithFormat:@"resumable start len=%lld", (long long)total]);
+
+    [[NSURLSession.sharedSession dataTaskWithRequest:start completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        NSHTTPURLResponse *h = [r isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)r : nil;
+        NSString *session = h.allHeaderFields[@"X-Goog-Upload-URL"] ?: h.allHeaderFields[@"x-goog-upload-url"];
+        LVLog([NSString stringWithFormat:@"start code=%ld session=%d", (long)h.statusCode, session.length > 0]);
+        if (session.length == 0) {
+            NSString *b = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"";
+            if (b.length > 160) b = [b substringToIndex:160];
+            LVLog([NSString stringWithFormat:@"start fail %@", b]);
             if (done) done(nil);
             return;
         }
-        NSDictionary *meta = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
-        NSString *dl = [(meta[@"downloadTokens"] ?: @"") componentsSeparatedByString:@","].firstObject;
-        NSString *videoURL = [NSString stringWithFormat:
-            @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media", enc];
-        if (dl.length) videoURL = [videoURL stringByAppendingFormat:@"&token=%@", dl];
-        LVLog([NSString stringWithFormat:@"media ok %@", videoURL]);
-        LVPost(videoURL, @"", uid, token, nil);
-        if (done) done(videoURL);
-    };
-    LVKeepUploader = up;
-    if (!LVKeepTasks) LVKeepTasks = [NSMutableArray array];
-    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-    cfg.timeoutIntervalForResource = 1800;
-    cfg.timeoutIntervalForRequest = 1800;
-    cfg.discretionary = NO;
-    NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg delegate:up delegateQueue:nil];
-    LVSession = sess;
-    NSURLSessionUploadTask *task = [sess uploadTaskWithRequest:req fromFile:fileURL];
-    [LVKeepTasks addObject:task];
-    LVLog([NSString stringWithFormat:@"media start %lld bytes", (long long)LVSize(fileURL)]);
-    [task resume];
+        NSMutableURLRequest *put = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:session]];
+        put.HTTPMethod = @"PUT";
+        [put setValue:@"upload, finalize" forHTTPHeaderField:@"X-Goog-Upload-Command"];
+        [put setValue:@"0" forHTTPHeaderField:@"X-Goog-Upload-Offset"];
+        [put setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
+        put.timeoutInterval = 1800;
+        LVUploader *up = [LVUploader new];
+        up.body = [NSMutableData data];
+        up.done = ^(NSInteger code, NSData *data, NSError *err) {
+            LVLog([NSString stringWithFormat:@"finalize code=%ld err=%ld", (long)code, (long)err.code]);
+            if (code < 200 || code >= 300 || !data.length) {
+                NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
+                if (b.length > 160) b = [b substringToIndex:160];
+                LVLog([NSString stringWithFormat:@"finalize fail %@", b]);
+                if (done) done(nil);
+                return;
+            }
+            NSDictionary *m = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+            NSString *dl = [(m[@"downloadTokens"] ?: @"") componentsSeparatedByString:@","].firstObject;
+            NSString *vurl = [NSString stringWithFormat:
+                @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media", enc];
+            if (dl.length) vurl = [vurl stringByAppendingFormat:@"&token=%@", dl];
+            LVLog(@"upload ok, posting");
+            LVPost(vurl, @"", uid, token, nil);
+            if (done) done(vurl);
+        };
+        LVKeepUploader = up;
+        if (!LVKeepTasks) LVKeepTasks = [NSMutableArray array];
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForResource = 1800;
+        NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg delegate:up delegateQueue:nil];
+        LVSession = sess;
+        NSURLSessionUploadTask *task = [sess uploadTaskWithRequest:put fromFile:fileURL];
+        [LVKeepTasks addObject:task];
+        LVLog(@"finalize put start");
+        [task resume];
+    }] resume];
 }
 
 static void LVInstallPostHook(void) {
