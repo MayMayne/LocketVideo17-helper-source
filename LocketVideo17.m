@@ -14,41 +14,22 @@
 #import <math.h>
 
 // No networking, entitlements, UIKit, or upload hooks. iOS 15+, arm64.
-static char LVJobKey, LVInternalKey, LVRemoteConfigMarkerKey;
-static BOOL LVQuickTime;
-static __thread unsigned LVOriginalDepth;
-static dispatch_queue_t LVLogQueue;
-static NSMutableSet<NSString *> *LVInstalled;
-static BOOL LVEnabled;
+static char _g3, _g16, _g6;
+static BOOL _g8;
+static __thread unsigned _g2;
+static dispatch_queue_t _g11;
+static NSMutableSet<NSString *> *_g1;
+static BOOL _g10;
 
-typedef void (^LVCompletion)(void);
-static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL));
-typedef void (^LVFetchCompletion)(NSData *data, NSURLResponse *response, NSError *error);
-static NSError *LVError(NSInteger code, NSString *message) {
-    return [NSError errorWithDomain:@"LocketVideo17" code:code
+typedef void (^_K)(void);
+static void _c1(NSURL *fileURL, void (^done)(NSString *downloadURL));
+typedef void (^_F)(NSData *data, NSURLResponse *response, NSError *error);
+static NSError *_e6(NSInteger code, NSString *message) {
+    return [NSError errorWithDomain:@"x17" code:code
                           userInfo:@{NSLocalizedDescriptionKey:message}];
 }
-static void LVLog(NSString *message) {
-    if (!LVLogQueue) return;
-    dispatch_async(LVLogQueue, ^{
-        @autoreleasepool {
-            NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-            if (!dir) return;
-            NSString *path = [dir stringByAppendingPathComponent:@"locket-video17.log"];
-            NSFileManager *fm = NSFileManager.defaultManager;
-            if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
-            @try {
-                NSFileHandle *h = [NSFileHandle fileHandleForWritingAtPath:path];
-                if (!h) return;
-                if ([h seekToEndOfFile] > 262144) { [h truncateFileAtOffset:0]; [h seekToFileOffset:0]; }
-                NSString *line = [NSString stringWithFormat:@"%.0f %@\n", NSDate.date.timeIntervalSince1970, message];
-                [h writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-                [h closeFile];
-            } @catch (__unused NSException *e) { }
-        }
-    });
-}
-static BOOL LVFullVideo(AVAssetExportSession *s, CMTime *duration) {
+static void _e7(NSString *message) { (void)message; }
+static BOOL _e1(AVAssetExportSession *s, CMTime *duration) {
     @try {
         if (!s.asset || s.asset.hasProtectedContent) return NO;
         CMTime d = s.asset.duration;
@@ -59,7 +40,7 @@ static BOOL LVFullVideo(AVAssetExportSession *s, CMTime *duration) {
         return YES;
     } @catch (__unused NSException *e) { return NO; }
 }
-static int64_t LVSize(NSURL *url) {
+static int64_t _e5(NSURL *url) {
     if (!url.isFileURL) return -1;
     const char *path = url.fileSystemRepresentation;
     struct stat info;
@@ -67,7 +48,7 @@ static int64_t LVSize(NSURL *url) {
     if (!path || stat(path, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0) return -1;
     return (int64_t)info.st_size;
 }
-static NSInteger LVSourceChannels(AVAssetTrack *track) {
+static NSInteger _e3(AVAssetTrack *track) {
     for (id format in track.formatDescriptions) {
         const AudioStreamBasicDescription *asbd =
             CMAudioFormatDescriptionGetStreamBasicDescription((__bridge CMAudioFormatDescriptionRef)format);
@@ -77,7 +58,7 @@ static NSInteger LVSourceChannels(AVAssetTrack *track) {
 }
 // Quality target for the rare render-only path. Prefer the source track's own bitrate;
 // use a resolution-based estimate when the container does not advertise one.
-static NSInteger LVSourceVideoRate(AVAsset *asset) {
+static NSInteger _e2(AVAsset *asset) {
     double rate = 0;
     AVAssetTrack *track = [asset tracksWithMediaType:AVMediaTypeVideo].firstObject;
     if (track) {
@@ -91,7 +72,7 @@ static NSInteger LVSourceVideoRate(AVAsset *asset) {
     if (!isfinite(rate) || rate <= 0) rate = 3000000;
     return (NSInteger)fmin(12000000.0, fmax(500000.0, rate));
 }
-static NSString *LVOutputType(AVAssetExportSession *s) {
+static NSString *_e4(AVAssetExportSession *s) {
     NSString *ext = s.outputURL.pathExtension.lowercaseString;
     NSString *type = s.outputFileType;
     if (!type) {
@@ -105,7 +86,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     return nil;
 }
 
-@interface LV17Job : NSObject
+@interface _J : NSObject
 @property(nonatomic, strong) AVAssetExportSession *owner;
 @property(nonatomic, strong) AVAsset *asset;
 @property(nonatomic, strong) NSURL *outputURL;
@@ -119,7 +100,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
 @property(nonatomic, strong) NSError *failure;
 @property(nonatomic) BOOL cancelled;
 @property(nonatomic) BOOL finished;
-@property(nonatomic, strong) NSMutableArray<LVCompletion> *callbacks;
+@property(nonatomic, strong) NSMutableArray<_K> *callbacks;
 @property(nonatomic, strong) NSURL *temporaryDirectory;
 - (void)run;
 - (void)requestCancel;
@@ -128,7 +109,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
           hevc:(BOOL)hevc attempt:(NSUInteger)attempt error:(NSError **)error;
 @end
 
-@implementation LV17Job
+@implementation _J
 - (BOOL)isCancelled { @synchronized(self) { return _cancelled; } }
 - (void)requestCancel {
     @synchronized(self) { if (!_finished) _cancelled = YES; }
@@ -137,19 +118,19 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     @synchronized(self) { if (!_finished) _fraction = fminf(.97f, fmaxf(0, p)); }
 }
 - (void)complete:(NSURL *)temporary error:(NSError *)error {
-    NSArray<LVCompletion> *handlers;
+    NSArray<_K> *handlers;
     AVAssetExportSession *keepAlive;
     @synchronized(self) {
         if (_finished) return;
-        if (_cancelled) error = LVError(NSUserCancelledError, @"Video export cancelled.");
-        if (!error && !temporary) error = LVError(20, @"Missing export result.");
+        if (_cancelled) error = _e6(NSUserCancelledError, @"Video export cancelled.");
+        if (!error && !temporary) error = _e6(20, @"Missing export result.");
         if (!error) {
             NSError *moveError;
             // Never overwrite or remove an existing app-owned output.
             if (![NSFileManager.defaultManager moveItemAtURL:temporary toURL:_outputURL error:&moveError])
-                error = LVError(21, @"Cannot publish the export (output must not already exist).");
+                error = _e6(21, @"Cannot publish the export (output must not already exist).");
             else
-                LVDirectUpload(_outputURL, nil);
+                _c1(_outputURL, nil);
         }
         _failure = error;
         _state = _cancelled ? AVAssetExportSessionStatusCancelled :
@@ -162,18 +143,18 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         _owner = nil; // Break session -> associated job -> session cycle after work.
     }
     if (_temporaryDirectory) [NSFileManager.defaultManager removeItemAtURL:_temporaryDirectory error:NULL];
-    LVLog([NSString stringWithFormat:@"finish status=%ld code=%ld", (long)_state, (long)error.code]);
+    _e7([NSString stringWithFormat:@"finish status=%ld code=%ld", (long)_state, (long)error.code]);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         (void)keepAlive;
-        for (LVCompletion callback in handlers) {
-            @try { callback(); } @catch (__unused NSException *e) { LVLog(@"completion exception"); }
+        for (_K callback in handlers) {
+            @try { callback(); } @catch (__unused NSException *e) { _e7(@"completion exception"); }
         }
     });
 }
 - (BOOL)validate:(NSURL *)url error:(NSError **)error {
-    int64_t bytes = LVSize(url);
+    int64_t bytes = _e5(url);
     if (bytes <= 0) {
-        if (error) *error = LVError(30, @"Exported file is missing or is not a regular file.");
+        if (error) *error = _e6(30, @"Exported file is missing or is not a regular file.");
         return NO;
     }
     AVURLAsset *result = [AVURLAsset URLAssetWithURL:url options:@{AVURLAssetPreferPreciseDurationAndTimingKey:@YES}];
@@ -183,10 +164,10 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     if (!isfinite(actual) || fabs(actual - expected) > .30 ||
         [result tracksWithMediaType:AVMediaTypeVideo].count == 0 ||
         (needsAudio && [result tracksWithMediaType:AVMediaTypeAudio].count == 0)) {
-        if (error) *error = LVError(31, @"Output failed full-duration/audio validation; no truncated file was published.");
+        if (error) *error = _e6(31, @"Output failed full-duration/audio validation; no truncated file was published.");
         return NO;
     }
-    LVLog([NSString stringWithFormat:@"validated seconds=%.3f bytes=%lld", actual, (long long)bytes]);
+    _e7([NSString stringWithFormat:@"validated seconds=%.3f bytes=%lld", actual, (long long)bytes]);
     return YES;
 }
 - (BOOL)canCopy:(NSURL **)source {
@@ -194,22 +175,22 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     // the app attached a passthrough videoComposition. Re-encoding a 4 MB clip produced 9 MB.
     if (![_asset isKindOfClass:AVURLAsset.class]) return NO;
     NSURL *url = ((AVURLAsset *)_asset).URL;
-    LVLog([NSString stringWithFormat:@"copy? path=%@ bytes=%lld out=%@",
-           url.path, (long long)LVSize(url), _outputURL.path]);
+    _e7([NSString stringWithFormat:@"copy? path=%@ bytes=%lld out=%@",
+           url.path, (long long)_e5(url), _outputURL.path]);
     if (!url.isFileURL || [url isEqual:_outputURL]) return NO;
-    int64_t size = LVSize(url);
-    if (size <= 0) { LVLog(@"copy no: size"); return NO; }
+    int64_t size = _e5(url);
+    if (size <= 0) { _e7(@"copy no: size"); return NO; }
     NSFileHandle *h = [NSFileHandle fileHandleForReadingFromURL:url error:NULL];
     NSData *head = [h readDataOfLength:12];
     [h closeFile];
     if (head.length < 12) return NO;
     const uint8_t *b = head.bytes;
-    if (memcmp(b + 4, "ftyp", 4) != 0) { LVLog(@"copy no: no ftyp"); return NO; }
+    if (memcmp(b + 4, "ftyp", 4) != 0) { _e7(@"copy no: no ftyp"); return NO; }
     BOOL qt = memcmp(b + 8, "qt  ", 4) == 0;
     // QuickTime and MP4 are the same ISO container with a different ftyp brand. Storage
     // rejects "qt  ", so copy the bytes untouched and rewrite the brand to mp42 — the
     // samples are not touched, so quality and size are preserved exactly.
-    LVQuickTime = qt;
+    _g8 = qt;
     NSString *ext = url.pathExtension.lowercaseString;
     // MP4 and MOV share the ISO base media container; copying .mov bytes into a .mp4 target is
     // valid and avoids a re-encode that tripled the file size.
@@ -218,8 +199,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                [_fileType isEqualToString:AVFileTypeAppleM4V];
     BOOL compatible = iso && ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] ||
                               [ext isEqualToString:@"m4v"]);
-    if (!compatible) LVLog(@"copy no: container mismatch");
-    if (compatible && size > 6200000) { LVLog(@"copy no: over 6.2MB"); return NO; }
+    if (!compatible) _e7(@"copy no: container mismatch");
+    if (compatible && size > 6200000) { _e7(@"copy no: over 6.2MB"); return NO; }
     if (compatible && source) *source = url;
     return compatible;
 }
@@ -233,20 +214,20 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 [@"lv17-" stringByAppendingString:NSUUID.UUID.UUIDString]] isDirectory:YES];
             if (![NSFileManager.defaultManager createDirectoryAtURL:_temporaryDirectory
                  withIntermediateDirectories:YES attributes:nil error:&error]) {
-                [self complete:nil error:LVError(22, @"Cannot create a private export directory.")]; return;
+                [self complete:nil error:_e6(22, @"Cannot create a private export directory.")]; return;
             }
             NSURL *temp = [_temporaryDirectory URLByAppendingPathComponent:
                            [@"export." stringByAppendingString:_outputURL.pathExtension]];
             NSURL *source;
             if ([self canCopy:&source]) {
-                LVLog(@"copy compatible original");
-                int64_t srcBytes = LVSize(source);
+                _e7(@"copy compatible original");
+                int64_t srcBytes = _e5(source);
                 if (![NSFileManager.defaultManager copyItemAtURL:source toURL:temp error:&error]) {
-                    [self complete:nil error:LVError(23, @"Cannot copy the source video.")]; return;
+                    [self complete:nil error:_e6(23, @"Cannot copy the source video.")]; return;
                 }
-                LVLog([NSString stringWithFormat:@"copied src=%lld dst=%lld",
-                       (long long)srcBytes, (long long)LVSize(temp)]);
-                if (LVQuickTime) {
+                _e7([NSString stringWithFormat:@"copied src=%lld dst=%lld",
+                       (long long)srcBytes, (long long)_e5(temp)]);
+                if (_g8) {
                     // Rewrite only the ftyp brand: "qt  " -> "mp42". Sample data is untouched.
                     @try {
                         NSFileHandle *fh = [NSFileHandle fileHandleForUpdatingURL:temp error:NULL];
@@ -254,9 +235,9 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                             [fh seekToFileOffset:8];
                             [fh writeData:[@"mp42" dataUsingEncoding:NSASCIIStringEncoding]];
                             [fh closeFile];
-                            LVLog(@"ftyp qt -> mp42");
+                            _e7(@"ftyp qt -> mp42");
                         }
-                    } @catch (__unused NSException *e) { LVLog(@"ftyp rewrite failed"); }
+                    } @catch (__unused NSException *e) { _e7(@"ftyp rewrite failed"); }
                 }
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
@@ -276,16 +257,16 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if (rate < 10000) rate = 10000;
                 // Keep HEVC: re-encoding QuickTime HEVC to H.264 nearly doubles the file.
                 BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:YES attempt:attempt error:&error];
-                int64_t got = LVSize(temp);
+                int64_t got = _e5(temp);
                 if (ok && got > 0 && got <= kTarget && [self validate:temp error:&error]) {
-                    LVLog([NSString stringWithFormat:@"under cap bytes=%lld", (long long)got]);
+                    _e7([NSString stringWithFormat:@"under cap bytes=%lld", (long long)got]);
                     [self complete:temp error:nil]; return;
                 }
-                LVLog([NSString stringWithFormat:@"retry bytes=%lld code=%ld", (long long)got, (long)error.code]);
+                _e7([NSString stringWithFormat:@"retry bytes=%lld code=%ld", (long long)got, (long)error.code]);
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
         } @catch (__unused NSException *e) {
-            [self complete:nil error:LVError(24, @"AVFoundation raised an exception while exporting.")];
+            [self complete:nil error:_e6(24, @"AVFoundation raised an exception while exporting.")];
         }
     }
 }
@@ -295,7 +276,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     [NSFileManager.defaultManager removeItemAtURL:url error:NULL];
     NSArray<AVAssetTrack *> *videos = [_asset tracksWithMediaType:AVMediaTypeVideo];
     NSArray<AVAssetTrack *> *audios = [_asset tracksWithMediaType:AVMediaTypeAudio];
-    if (!videos.count) { if (error) *error = LVError(40, @"No video track."); return NO; }
+    if (!videos.count) { if (error) *error = _e6(40, @"No video track."); return NO; }
     double sourceFPS = videos.firstObject.nominalFrameRate;
     NSInteger fps = sourceFPS > 0 ? MIN(60, MAX(1, (NSInteger)llround(sourceFPS))) : 30;
     AVVideoComposition *composition = _videoComposition;
@@ -308,7 +289,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         CGRect bounds = CGRectApplyAffineTransform((CGRect){CGPointZero, track.naturalSize}, track.preferredTransform);
         CGFloat w = fabs(bounds.size.width), h = fabs(bounds.size.height);
         if (w < 2 || h < 2 || !isfinite(w) || !isfinite(h)) {
-            if (error) *error = LVError(41, @"Invalid video dimensions."); return NO;
+            if (error) *error = _e6(41, @"Invalid video dimensions."); return NO;
         }
         // Scale down when the byte budget is tight, so long videos stay under the server cap.
         NSInteger maxEdge = rate < 90000 ? 480 : (rate < 200000 ? 640 : (rate < 400000 ? 720 : 1080));
@@ -333,14 +314,14 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         composition = c;
     }
     if (renderSize.width < 2 || renderSize.height < 2 || !isfinite(renderSize.width) || !isfinite(renderSize.height)) {
-        if (error) *error = LVError(41, @"Invalid composition dimensions."); return NO;
+        if (error) *error = _e6(41, @"Invalid composition dimensions."); return NO;
     }
     NSInteger width = MAX(2, (NSInteger)floor(renderSize.width / 2) * 2);
     NSInteger height = MAX(2, (NSInteger)floor(renderSize.height / 2) * 2);
     NSError *underlying = nil;
     AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:_asset error:&underlying];
     AVAssetWriter *writer = [[AVAssetWriter alloc] initWithURL:url fileType:_fileType error:&underlying];
-    if (!reader || !writer) { if (error) *error = LVError(42, @"Cannot create reader/writer for this container."); return NO; }
+    if (!reader || !writer) { if (error) *error = _e6(42, @"Cannot create reader/writer for this container."); return NO; }
     reader.timeRange = CMTimeRangeMake(kCMTimeZero, _duration);
     writer.shouldOptimizeForNetworkUse = YES;
     writer.metadata = _metadata ?: @[];
@@ -371,13 +352,13 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     videoIn.transform = CGAffineTransformIdentity;
     if (![reader canAddOutput:videoOut] || ![writer canApplyOutputSettings:videoSettings forMediaType:AVMediaTypeVideo] ||
         ![writer canAddInput:videoIn]) {
-        if (error) *error = LVError(43, @"Video encoder settings are unsupported."); return NO;
+        if (error) *error = _e6(43, @"Video encoder settings are unsupported."); return NO;
     }
     [reader addOutput:videoOut]; [writer addInput:videoIn];
     AVAssetReaderAudioMixOutput *audioOut = nil;
     AVAssetWriterInput *audioIn = nil;
     if (audios.count) {
-        NSInteger channels = LVSourceChannels(audios.firstObject);
+        NSInteger channels = _e3(audios.firstObject);
         NSInteger sampleRate = 44100;
         NSDictionary *pcm = @{AVFormatIDKey:@(kAudioFormatLinearPCM), AVSampleRateKey:@(sampleRate),
             AVNumberOfChannelsKey:@(channels), AVLinearPCMBitDepthKey:@16, AVLinearPCMIsFloatKey:@NO,
@@ -391,17 +372,17 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         audioIn.expectsMediaDataInRealTime = NO;
         if (![reader canAddOutput:audioOut] || ![writer canApplyOutputSettings:aac forMediaType:AVMediaTypeAudio] ||
             ![writer canAddInput:audioIn]) {
-            if (error) *error = LVError(44, @"Audio encoder settings are unsupported; audio will not be silently dropped."); return NO;
+            if (error) *error = _e6(44, @"Audio encoder settings are unsupported; audio will not be silently dropped."); return NO;
         }
         [reader addOutput:audioOut]; [writer addInput:audioIn];
     }
-    LVLog([NSString stringWithFormat:@"encode attempt=%lu seconds=%.3f video=%ld audio=%ld %ldx%ld %@",
+    _e7([NSString stringWithFormat:@"encode attempt=%lu seconds=%.3f video=%ld audio=%ld %ldx%ld %@",
            (unsigned long)attempt, CMTimeGetSeconds(_duration), (long)rate, (long)audioRate,
            (long)width, (long)height, hevc ? @"HEVC" : @"H264"]);
     if (![writer startWriting] || ![reader startReading]) {
-        LVLog([NSString stringWithFormat:@"start failed reader=%ld writer=%ld", (long)reader.error.code, (long)writer.error.code]);
+        _e7([NSString stringWithFormat:@"start failed reader=%ld writer=%ld", (long)reader.error.code, (long)writer.error.code]);
         [reader cancelReading]; [writer cancelWriting];
-        if (error) *error = LVError(45, @"Cannot start the full-duration encoder."); return NO;
+        if (error) *error = _e6(45, @"Cannot start the full-duration encoder."); return NO;
     }
     [writer startSessionAtSourceTime:kCMTimeZero];
     BOOL videoDone = NO, audioDone = audioOut == nil, failed = NO;
@@ -445,9 +426,9 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
         }
     }
     if (failed || !videoSamples || (audios.count && !audioSamples) || reader.status != AVAssetReaderStatusCompleted) {
-        LVLog([NSString stringWithFormat:@"pipeline failed reader=%ld writer=%ld", (long)reader.error.code, (long)writer.error.code]);
+        _e7([NSString stringWithFormat:@"pipeline failed reader=%ld writer=%ld", (long)reader.error.code, (long)writer.error.code]);
         [reader cancelReading]; [writer cancelWriting];
-        if (error) *error = LVError(46, @"The full-duration audio/video pipeline failed or was cancelled."); return NO;
+        if (error) *error = _e6(46, @"The full-duration audio/video pipeline failed or was cancelled."); return NO;
     }
     [writer endSessionAtSourceTime:_duration];
     [self setWorkingProgress:.95];
@@ -457,31 +438,31 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     while (dispatch_semaphore_wait(finished, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 4)) != 0) {
         if (self.isCancelled || NSProcessInfo.processInfo.systemUptime - finishStart > 120) {
             [writer cancelWriting];
-            if (error) *error = LVError(47, @"Finishing the export was cancelled or timed out."); return NO;
+            if (error) *error = _e6(47, @"Finishing the export was cancelled or timed out."); return NO;
         }
     }
     if (writer.status != AVAssetWriterStatusCompleted) {
-        if (error) *error = LVError(48, @"The encoder did not finish successfully."); return NO;
+        if (error) *error = _e6(48, @"The encoder did not finish successfully."); return NO;
     }
     return YES;
 }
 @end
 
-static BOOL LVBypass(id session) {
-    return !LVEnabled || LVOriginalDepth || objc_getAssociatedObject(session, &LVInternalKey) != nil;
+static BOOL _e8(id session) {
+    return !_g10 || _g2 || objc_getAssociatedObject(session, &_g16) != nil;
 }
-static void LVExport(AVAssetExportSession *session, SEL selector, LVCompletion completion, IMP original) {
+static void _g15(AVAssetExportSession *session, SEL selector, _K completion, IMP original) {
     CMTime duration;
-    if (LVBypass(session)) {
+    if (_e8(session)) {
         // Reentrant superclass calls must stay on the original path, not allocate another helper job.
-        LVOriginalDepth++;
-        @try { ((void (*)(id, SEL, LVCompletion))original)(session, selector, completion); }
-        @finally { LVOriginalDepth--; }
+        _g2++;
+        @try { ((void (*)(id, SEL, _K))original)(session, selector, completion); }
+        @finally { _g2--; }
         return;
     }
-    LV17Job *job;
+    _J *job;
     @synchronized(session) {
-        LV17Job *existing = objc_getAssociatedObject(session, &LVJobKey);
+        _J *existing = objc_getAssociatedObject(session, &_g3);
         if (existing) {
             @synchronized(existing) {
                 if (!existing.finished) {
@@ -493,44 +474,44 @@ static void LVExport(AVAssetExportSession *session, SEL selector, LVCompletion c
             // An export session represents one operation. Never replace its terminal job/state,
             // including when a previous completion reenters before the callback batch has returned.
             if (completion) {
-                LVCompletion callback = [completion copy];
+                _K callback = [completion copy];
                 dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
                     __attribute__((objc_precise_lifetime)) AVAssetExportSession *keepAlive = session;
                     @try { callback(); }
-                    @catch (__unused NSException *e) { LVLog(@"completion exception"); }
+                    @catch (__unused NSException *e) { _e7(@"completion exception"); }
                     (void)keepAlive;
                 });
             }
             return;
         }
-        if (!LVFullVideo(session, &duration)) {
-            LVOriginalDepth++;
-            @try { ((void (*)(id, SEL, LVCompletion))original)(session, selector, completion); }
-            @finally { LVOriginalDepth--; }
+        if (!_e1(session, &duration)) {
+            _g2++;
+            @try { ((void (*)(id, SEL, _K))original)(session, selector, completion); }
+            @finally { _g2--; }
             return;
         }
-        job = [LV17Job new];
+        job = [_J new];
         job.owner = session; job.asset = session.asset; job.duration = duration;
-        job.outputURL = session.outputURL; job.fileType = LVOutputType(session);
+        job.outputURL = session.outputURL; job.fileType = _e4(session);
         job.videoComposition = session.videoComposition; job.audioMix = session.audioMix;
         job.metadata = session.metadata;
         job.callbacks = [NSMutableArray array];
         if (completion) [job.callbacks addObject:[completion copy]];
         job.state = AVAssetExportSessionStatusWaiting;
-        objc_setAssociatedObject(session, &LVJobKey, job, OBJC_ASSOCIATION_RETAIN);
+        objc_setAssociatedObject(session, &_g3, job, OBJC_ASSOCIATION_RETAIN);
     }
     // Do not assign timeRange/fileLengthLimit here: both setters are swizzled and re-enter
-    // LVFullVideo while the app is mid-upload, which crashed on video upload.
+    // _e1 while the app is mid-upload, which crashed on video upload.
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         if (!job.outputURL.isFileURL || !job.fileType) {
-            [job complete:nil error:LVError(50, @"A matching .mp4, .mov or .m4v local output URL/container is required.")];
+            [job complete:nil error:_e6(50, @"A matching .mp4, .mov or .m4v local output URL/container is required.")];
         } else {
             [job run];
         }
     });
 }
 
-static BOOL LVOwnsSelector(Class cls, SEL selector, Method *result) {
+static BOOL _d2(Class cls, SEL selector, Method *result) {
     unsigned count = 0;
     Method *methods = class_copyMethodList(cls, &count);
     BOOL found = NO;
@@ -543,62 +524,62 @@ static BOOL LVOwnsSelector(Class cls, SEL selector, Method *result) {
     free(methods);
     return found;
 }
-static void LVInstallOne(Class cls, SEL selector) {
+static void _d3(Class cls, SEL selector) {
     Method method;
-    if (!LVOwnsSelector(cls, selector, &method)) return; // Never replace an inherited Method.
+    if (!_d2(cls, selector, &method)) return; // Never replace an inherited Method.
     NSString *key = [NSString stringWithFormat:@"%p:%s", cls, sel_getName(selector)];
-    if ([LVInstalled containsObject:key]) return;
+    if ([_g1 containsObject:key]) return;
     IMP original = method_getImplementation(method);
     IMP replacement = NULL;
     if (sel_isEqual(selector, @selector(setTimeRange:))) {
         replacement = imp_implementationWithBlock(^(AVAssetExportSession *s, CMTimeRange range) {
             CMTime d;
-            if (!LVBypass(s) && LVFullVideo(s, &d)) range = CMTimeRangeMake(kCMTimeZero, d);
+            if (!_e8(s) && _e1(s, &d)) range = CMTimeRangeMake(kCMTimeZero, d);
             ((void (*)(id, SEL, CMTimeRange))original)(s, selector, range);
         });
     } else if (sel_isEqual(selector, @selector(setFileLengthLimit:))) {
         replacement = imp_implementationWithBlock(^(AVAssetExportSession *s, long long limit) {
-            if (!LVBypass(s) && LVFullVideo(s, NULL)) limit = 0;
+            if (!_e8(s) && _e1(s, NULL)) limit = 0;
             ((void (*)(id, SEL, long long))original)(s, selector, limit);
         });
     } else if (sel_isEqual(selector, @selector(exportAsynchronouslyWithCompletionHandler:))) {
-        replacement = imp_implementationWithBlock(^(AVAssetExportSession *s, LVCompletion completion) {
-            LVExport(s, selector, completion, original);
+        replacement = imp_implementationWithBlock(^(AVAssetExportSession *s, _K completion) {
+            _g15(s, selector, completion, original);
         });
     } else if (sel_isEqual(selector, @selector(status))) {
         replacement = imp_implementationWithBlock(^AVAssetExportSessionStatus(AVAssetExportSession *s) {
-            LV17Job *job = LVBypass(s) ? nil : objc_getAssociatedObject(s, &LVJobKey);
+            _J *job = _e8(s) ? nil : objc_getAssociatedObject(s, &_g3);
             if (job) { @synchronized(job) { return job.state; } }
             return ((AVAssetExportSessionStatus (*)(id, SEL))original)(s, selector);
         });
     } else if (sel_isEqual(selector, @selector(progress))) {
         replacement = imp_implementationWithBlock(^float(AVAssetExportSession *s) {
-            LV17Job *job = LVBypass(s) ? nil : objc_getAssociatedObject(s, &LVJobKey);
+            _J *job = _e8(s) ? nil : objc_getAssociatedObject(s, &_g3);
             if (job) { @synchronized(job) { return job.fraction; } }
             return ((float (*)(id, SEL))original)(s, selector);
         });
     } else if (sel_isEqual(selector, @selector(error))) {
         replacement = imp_implementationWithBlock(^NSError *(AVAssetExportSession *s) {
-            LV17Job *job = LVBypass(s) ? nil : objc_getAssociatedObject(s, &LVJobKey);
+            _J *job = _e8(s) ? nil : objc_getAssociatedObject(s, &_g3);
             if (job) { @synchronized(job) { return job.failure; } }
             return ((NSError *(*)(id, SEL))original)(s, selector);
         });
     } else if (sel_isEqual(selector, @selector(cancelExport))) {
         replacement = imp_implementationWithBlock(^(AVAssetExportSession *s) {
-            LV17Job *job = LVBypass(s) ? nil : objc_getAssociatedObject(s, &LVJobKey);
+            _J *job = _e8(s) ? nil : objc_getAssociatedObject(s, &_g3);
             if (job) { [job requestCancel]; return; }
-            LVOriginalDepth++;
+            _g2++;
             @try { ((void (*)(id, SEL))original)(s, selector); }
-            @finally { LVOriginalDepth--; }
+            @finally { _g2--; }
         });
     }
     if (replacement) {
         class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
-        [LVInstalled addObject:key];
+        [_g1 addObject:key];
     }
 }
-static void LVInstallClasses(void) {
-    @synchronized(LVInstalled) {
+static void _d1(void) {
+    @synchronized(_g1) {
         Class base = AVAssetExportSession.class;
         unsigned count = 0;
         Class *classes = objc_copyClassList(&count);
@@ -609,42 +590,42 @@ static void LVInstallClasses(void) {
             Class cls = classes[i], cursor = cls;
             while (cursor && cursor != base) cursor = class_getSuperclass(cursor);
             if (cursor != base) continue;
-            for (unsigned j = 0; j < sizeof(selectors) / sizeof(selectors[0]); j++) LVInstallOne(cls, selectors[j]);
+            for (unsigned j = 0; j < sizeof(selectors) / sizeof(selectors[0]); j++) _d3(cls, selectors[j]);
         }
         free(classes);
-        LVLog([NSString stringWithFormat:@"installed methods=%lu", (unsigned long)LVInstalled.count]);
+        _e7([NSString stringWithFormat:@"installed methods=%lu", (unsigned long)_g1.count]);
     }
 }
-static __strong NSString *LVFirebaseToken;
-static void LVStoreToken(NSString *token) {
+static __strong NSString *_g9;
+static void _c5(NSString *token) {
     if (token.length < 20) return;
     @synchronized ([NSObject class]) {
-        if (![token isEqualToString:LVFirebaseToken]) {
-            LVFirebaseToken = [token copy];
-            LVLog(@"token captured");
+        if (![token isEqualToString:_g9]) {
+            _g9 = [token copy];
+            _e7(@"token captured");
         }
     }
 }
 // Direct upload: POST the whole file to Firebase Storage, then let the app post the moment.
 // Runs only after a successful export, using the token the app itself sent.
-static __strong NSString *LVTok;
-static __strong NSString *LVUid;
-static void LVCapture(NSString *t, NSString *u) {
+static __strong NSString *_g5;
+static __strong NSString *_g4;
+static void _c6(NSString *t, NSString *u) {
     if (t.length < 20) return;
     @synchronized ([NSObject class]) {
-        LVTok = [t copy];
-        if (u.length > 5) LVUid = [u copy];
-        LVLog([NSString stringWithFormat:@"token captured uid=%@", LVUid ?: @"?"]);
+        _g5 = [t copy];
+        if (u.length > 5) _g4 = [u copy];
+        _e7([NSString stringWithFormat:@"token captured uid=%@", _g4 ?: @"?"]);
     }
 }
 // Hook FIRUser token delivery: the SDK fetches the token for every upload, so this
 // captures the exact token the app is using without guessing where it is stored.
-static void LVInstallAppCheckHook(void) {
+static void _a7(void) {
     static BOOL done;
     if (done) return;
     done = YES;
     Class ac = NSClassFromString(@"GACAppCheck");
-    if (!ac) { LVLog(@"appcheck class absent"); return; }
+    if (!ac) { _e7(@"appcheck class absent"); return; }
     for (NSString *name in @[@"limitedUseTokenWithCompletion:", @"tokenWithCompletion:"]) {
         SEL sel = NSSelectorFromString(name);
         Method m = class_getInstanceMethod(ac, sel);
@@ -654,59 +635,59 @@ static void LVInstallAppCheckHook(void) {
             void (^wrap)(id, NSError *) = ^(id res, NSError *e) {
                 NSString *t = nil;
                 @try { t = [res valueForKey:@"token"]; } @catch (__unused NSException *x) { }
-                LVLog([NSString stringWithFormat:@"appcheck %@ token=%d err=%ld",
+                _e7([NSString stringWithFormat:@"appcheck %@ token=%d err=%ld",
                        name, t.length > 0, (long)e.code]);
                 if (cb) cb(res, e);
             };
             ((void (*)(id, SEL, id))o)(self, sel, wrap);
         });
         class_replaceMethod(ac, sel, r, method_getTypeEncoding(m));
-        LVLog([NSString stringWithFormat:@"appcheck hooked %@", name]);
+        _e7([NSString stringWithFormat:@"appcheck hooked %@", name]);
     }
 }
-static void LVInstallTokenHook(void) {
+static void _a6(void) {
     static BOOL done;
     if (done) return;
     done = YES;
     Class user = NSClassFromString(@"FIRUser");
     SEL sel = NSSelectorFromString(@"getIDTokenForcingRefresh:completion:");
     Method m = user ? class_getInstanceMethod(user, sel) : NULL;
-    if (!m) { LVLog(@"FIRUser token sel absent"); return; }
+    if (!m) { _e7(@"FIRUser token sel absent"); return; }
     IMP o = method_getImplementation(m);
     IMP r = imp_implementationWithBlock(^(id self, BOOL force, void (^cb)(NSString *, NSError *)) {
         void (^wrap)(NSString *, NSError *) = ^(NSString *t, NSError *e) {
             NSString *uid = nil;
             @try { uid = [self valueForKey:@"uid"]; } @catch (__unused NSException *x) { }
-            LVCapture(t, uid);
+            _c6(t, uid);
             if (cb) cb(t, e);
         };
         ((void (*)(id, SEL, BOOL, id))o)(self, sel, force, wrap);
     });
     class_replaceMethod(user, sel, r, method_getTypeEncoding(m));
-    LVLog(@"token hook on");
+    _e7(@"token hook on");
 }
 // Ask Firebase for a token synchronously when one was not captured yet.
-static BOOL LVFetchTokenNow(void) {
+static BOOL _c3(void) {
     Class auth = NSClassFromString(@"FIRAuth");
     if (!auth) return NO;
     id inst = ((id (*)(id, SEL))objc_msgSend)(auth, NSSelectorFromString(@"auth"));
     id user = inst ? ((id (*)(id, SEL))objc_msgSend)(inst, NSSelectorFromString(@"currentUser")) : nil;
-    if (!user) { LVLog(@"no current user"); return NO; }
+    if (!user) { _e7(@"no current user"); return NO; }
     NSString *uid = nil;
     @try { uid = [user valueForKey:@"uid"]; } @catch (__unused NSException *e) { }
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     SEL sel = NSSelectorFromString(@"getIDTokenForcingRefresh:completion:");
     if (![user respondsToSelector:sel]) return NO;
     ((void (*)(id, SEL, BOOL, id))objc_msgSend)(user, sel, NO, ^(NSString *t, NSError *e) {
-        LVCapture(t, uid);
+        _c6(t, uid);
         dispatch_semaphore_signal(sem);
     });
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
-    return LVTok.length > 20;
+    return _g5.length > 20;
 }
 // The web uploader takes uid from the JWT claim user_id / sub, which can differ from
 // FIRUser.uid. Storage rules key on the token claim, so use the claim.
-static NSString *LVUIDFromToken(NSString *token) {
+static NSString *_c4(NSString *token) {
     NSArray *parts = [token componentsSeparatedByString:@"."];
     if (parts.count < 2) return nil;
     NSString *b64 = parts[1];
@@ -721,11 +702,11 @@ static NSString *LVUIDFromToken(NSString *token) {
     double exp = [j[@"exp"] doubleValue];
     double iat = [j[@"iat"] doubleValue];
     double now = NSDate.date.timeIntervalSince1970;
-    LVLog([NSString stringWithFormat:@"jwt uid=%@ exp_in=%.0fs iat=%.0f aud=%@ iss=%@",
+    _e7([NSString stringWithFormat:@"jwt uid=%@ exp_in=%.0fs iat=%.0f aud=%@ iss=%@",
            u ?: @"-", exp - now, iat, j[@"aud"] ?: @"-", j[@"iss"] ?: @"-"]);
     return [u isKindOfClass:NSString.class] ? u : nil;
 }
-static NSString *LVRefreshToken(void) {
+static NSString *_c2(void) {
     // Same flow as the working web uploader: exchange refresh_token for a fresh id_token.
     Class auth = NSClassFromString(@"FIRAuth");
     if (!auth) return nil;
@@ -734,7 +715,7 @@ static NSString *LVRefreshToken(void) {
     if (!user) return nil;
     NSString *rt = nil;
     @try { rt = [user valueForKey:@"refreshToken"]; } @catch (__unused NSException *e) { }
-    if (rt.length < 20) { LVLog(@"no refresh token"); return nil; }
+    if (rt.length < 20) { _e7(@"no refresh token"); return nil; }
     NSString *key = @"AIzaSyCQngaaXQIfJaH0aS2l7REgIjD7nL431So";
     NSString *url = [NSString stringWithFormat:@"https://securetoken.googleapis.com/v1/token?key=%@", key];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
@@ -750,7 +731,7 @@ static NSString *LVRefreshToken(void) {
             NSInteger code = [r isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)r).statusCode : 0;
             NSDictionary *j = d ? [NSJSONSerialization JSONObjectWithData:d options:0 error:NULL] : nil;
             NSString *t = j[@"id_token"];
-            LVLog([NSString stringWithFormat:@"refresh code=%ld token=%d", (long)code, t.length > 0]);
+            _e7([NSString stringWithFormat:@"refresh code=%ld token=%d", (long)code, t.length > 0]);
             if ([t isKindOfClass:NSString.class] && t.length > 20) out = t;
         } @catch (__unused NSException *x) { }
         dispatch_semaphore_signal(sem);
@@ -758,7 +739,7 @@ static NSString *LVRefreshToken(void) {
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)));
     return out;
 }
-static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
+static void _c7(NSString *videoURL, NSString *thumbURL, NSString *uid, NSString *token, void (^done)(BOOL ok)) {
     NSString *uuidHex = [[NSUUID.UUID.UUIDString stringByReplacingOccurrencesOfString:@"-" withString:@""] lowercaseString];
     NSString *md5 = [NSString stringWithFormat:@"%@_%.0f", uuidHex, NSDate.date.timeIntervalSince1970];
     NSString *install = [uuidHex substringToIndex:MIN(22, uuidHex.length)];
@@ -800,20 +781,20 @@ static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSStri
             NSDictionary *res = j[@"result"];
             ok = (res && !res[@"errors"]);
         }
-        LVLog([NSString stringWithFormat:@"postMomentV2 code=%ld ok=%d body=%@", (long)code, ok, body]);
+        _e7([NSString stringWithFormat:@"postMomentV2 code=%ld ok=%d body=%@", (long)code, ok, body]);
         if (done) done(ok);
     }] resume];
 }
-@interface LVUploader : NSObject <NSURLSessionDataDelegate>
+@interface _U : NSObject <NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSMutableData *body;
 @property (nonatomic, copy) void (^done)(NSInteger code, NSData *data, NSError *err);
 @end
-@implementation LVUploader
+@implementation _U
 - (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didSendBodyData:(int64_t)b totalBytesSent:(int64_t)sent totalBytesExpectedToSend:(int64_t)exp {
     static int64_t last;
     if (sent - last > 1048576) {
         last = sent;
-        LVLog([NSString stringWithFormat:@"up progress %lld/%lld", (long long)sent, (long long)exp]);
+        _e7([NSString stringWithFormat:@"up progress %lld/%lld", (long long)sent, (long long)exp]);
     }
 }
 - (void)URLSession:(NSURLSession *)s dataTask:(NSURLSessionDataTask *)t didReceiveData:(NSData *)d {
@@ -821,28 +802,28 @@ static void LVPost(NSString *videoURL, NSString *thumbURL, NSString *uid, NSStri
 }
 - (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didCompleteWithError:(NSError *)e {
     NSInteger code = [t.response isKindOfClass:NSHTTPURLResponse.class] ? ((NSHTTPURLResponse *)t.response).statusCode : 0;
-    LVLog([NSString stringWithFormat:@"up complete code=%ld err=%ld bodylen=%lu", (long)code, (long)e.code, (unsigned long)self.body.length]);
+    _e7([NSString stringWithFormat:@"up complete code=%ld err=%ld bodylen=%lu", (long)code, (long)e.code, (unsigned long)self.body.length]);
     if (self.done) self.done(code, self.body, e);
 }
 @end
-static LVUploader *LVKeepUploader;
-static NSURLSession *LVSession;
-static NSMutableArray *LVKeepTasks;
+static _U *_g13;
+static NSURLSession *_g12;
+static NSMutableArray *_g7;
 
-static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
+static void _c1(NSURL *fileURL, void (^done)(NSString *downloadURL)) {
     NSString *token; NSString *uid;
-    @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
-    if (!token && LVFetchTokenNow()) {
-        @synchronized ([NSObject class]) { token = [LVTok copy]; uid = [LVUid copy]; }
+    @synchronized ([NSObject class]) { token = [_g5 copy]; uid = [_g4 copy]; }
+    if (!token && _c3()) {
+        @synchronized ([NSObject class]) { token = [_g5 copy]; uid = [_g4 copy]; }
     }
-    NSString *fresh = LVRefreshToken();
+    NSString *fresh = _c2();
     if (fresh) token = fresh;
-    if (!token) { LVLog(@"direct: no token"); if (done) done(nil); return; }
-    NSString *claimUID = LVUIDFromToken(token);
+    if (!token) { _e7(@"direct: no token"); if (done) done(nil); return; }
+    NSString *claimUID = _c4(token);
     if (claimUID.length) uid = claimUID;
-    if (!uid) { LVLog(@"direct: no uid"); if (done) done(nil); return; }
+    if (!uid) { _e7(@"direct: no uid"); if (done) done(nil); return; }
 
-    int64_t total = LVSize(fileURL);
+    int64_t total = _e5(fileURL);
     NSString *name = [NSString stringWithFormat:@"users/%@/moments/videos/%@.mp4", uid, NSUUID.UUID.UUIDString];
     NSString *enc = [name stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
     NSString *startURL = [NSString stringWithFormat:
@@ -870,16 +851,16 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
         @"metadata": @{@"creator": uid, @"visibility": @"private"}
     };
     start.HTTPBody = [NSJSONSerialization dataWithJSONObject:meta options:0 error:NULL];
-    LVLog([NSString stringWithFormat:@"resumable start len=%lld", (long long)total]);
+    _e7([NSString stringWithFormat:@"resumable start len=%lld", (long long)total]);
 
     [[NSURLSession.sharedSession dataTaskWithRequest:start completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         NSHTTPURLResponse *h = [r isKindOfClass:NSHTTPURLResponse.class] ? (NSHTTPURLResponse *)r : nil;
         NSString *session = h.allHeaderFields[@"X-Goog-Upload-URL"] ?: h.allHeaderFields[@"x-goog-upload-url"];
-        LVLog([NSString stringWithFormat:@"start code=%ld session=%d", (long)h.statusCode, session.length > 0]);
+        _e7([NSString stringWithFormat:@"start code=%ld session=%d", (long)h.statusCode, session.length > 0]);
         if (session.length == 0) {
             NSString *b = d ? [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] : @"";
             if (b.length > 160) b = [b substringToIndex:160];
-            LVLog([NSString stringWithFormat:@"start fail %@", b]);
+            _e7([NSString stringWithFormat:@"start fail %@", b]);
             if (done) done(nil);
             return;
         }
@@ -889,14 +870,14 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
         [put setValue:@"0" forHTTPHeaderField:@"X-Goog-Upload-Offset"];
         [put setValue:@"application/octet-stream" forHTTPHeaderField:@"Content-Type"];
         put.timeoutInterval = 1800;
-        LVUploader *up = [LVUploader new];
+        _U *up = [_U new];
         up.body = [NSMutableData data];
         up.done = ^(NSInteger code, NSData *data, NSError *err) {
-            LVLog([NSString stringWithFormat:@"finalize code=%ld err=%ld", (long)code, (long)err.code]);
+            _e7([NSString stringWithFormat:@"finalize code=%ld err=%ld", (long)code, (long)err.code]);
             if (code < 200 || code >= 300 || !data.length) {
                 NSString *b = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : @"";
                 if (b.length > 160) b = [b substringToIndex:160];
-                LVLog([NSString stringWithFormat:@"finalize fail %@", b]);
+                _e7([NSString stringWithFormat:@"finalize fail %@", b]);
                 if (done) done(nil);
                 return;
             }
@@ -905,26 +886,26 @@ static void LVDirectUpload(NSURL *fileURL, void (^done)(NSString *downloadURL)) 
             NSString *vurl = [NSString stringWithFormat:
                 @"https://firebasestorage.googleapis.com/v0/b/locket-video/o/%@?alt=media", enc];
             if (dl.length) vurl = [vurl stringByAppendingFormat:@"&token=%@", dl];
-            LVLog(@"upload ok, posting");
-            LVPost(vurl, @"", uid, token, nil);
+            _e7(@"upload ok, posting");
+            _c7(vurl, @"", uid, token, nil);
             if (done) done(vurl);
         };
-        LVKeepUploader = up;
-        if (!LVKeepTasks) LVKeepTasks = [NSMutableArray array];
+        _g13 = up;
+        if (!_g7) _g7 = [NSMutableArray array];
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
         cfg.timeoutIntervalForResource = 1800;
         NSURLSession *sess = [NSURLSession sessionWithConfiguration:cfg delegate:up delegateQueue:nil];
-        LVSession = sess;
+        _g12 = sess;
         NSURLSessionUploadTask *task = [sess uploadTaskWithRequest:put fromFile:fileURL];
-        [LVKeepTasks addObject:task];
-        LVLog(@"finalize put start");
+        [_g7 addObject:task];
+        _e7(@"finalize put start");
         [task resume];
     }] resume];
 }
 
-static void LVInstallPostHook(void) {
+static void _a5(void) {
 }
-static void LVInstallUploaderChunkHook(void) {
+static void _a2(void) {
     static BOOL tried;
     if (tried) return;
     tried = YES;
@@ -957,9 +938,9 @@ static void LVInstallUploaderChunkHook(void) {
                         [mreq setValue:@"FirebaseFunctions/10.20.0 iOS/17.4 com.locket.Locket"
                      forHTTPHeaderField:@"User-Agent"];
                     }
-                    LVLog(@"ios hdr added");
+                    _e7(@"ios hdr added");
                 }
-                LVLog([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
+                _e7([NSString stringWithFormat:@"PUT cmd=%@ off=%@ total=%@ bodylen=%@ method=%@ appcheck=%d auth=%d",
                        cmd ?: @"-", off ?: @"-", len ?: @"-", cl ?: @"-", [req HTTPMethod],
                        ac.length > 0, auth.length > 0]);
             }
@@ -971,14 +952,14 @@ static void LVInstallUploaderChunkHook(void) {
 // Remote Config feature gate override. Only the two named keys are affected. The object the
 // original -configValueForKey: returned is NEVER replaced: a marker is attached to that same
 // instance so its own getters can answer true without changing the class the app receives.
-static Class LVRemoteConfigValueClass;
+static Class _g14;
 // Probe only: a dynamic -boolValue send reaches whichever implementation the receiver's class
 // has (the replacement), which passes through to the real IMP while the marker is unset.
-@protocol LVRemoteConfigValueReading <NSObject>
+@protocol _P1 <NSObject>
 - (BOOL)boolValue;
 @end
-static char LVRemoteConfigMarkerKey;
-static BOOL LVRemoteConfigWantedKey(NSString *key) {
+static char _g6;
+static BOOL _b1(NSString *key) {
     if (![key isKindOfClass:NSString.class]) return NO;
     // Mic + upload + sound. camera_roll_preview_enabled is left alone: forcing it
     // made the library fail with "Không thể tải các mục".
@@ -987,65 +968,65 @@ static BOOL LVRemoteConfigWantedKey(NSString *key) {
            [key isEqualToString:@"video_sound_enabled"] ||
            [key isEqualToString:@"sound_enabled"];
 }
-static BOOL LVRemoteConfigMarked(id value) {
-    return value && objc_getAssociatedObject(value, &LVRemoteConfigMarkerKey) != nil;
+static BOOL _b2(id value) {
+    return value && objc_getAssociatedObject(value, &_g6) != nil;
 }
 // Force-true even when the value object is not FIRRemoteConfigValue (Swift wrapper).
-static void LVRemoteConfigMarkAny(id value, NSString *key) {
-    if (!value || LVRemoteConfigMarked(value)) return;
+static void _b3(id value, NSString *key) {
+    if (!value || _b2(value)) return;
     @try {
-        objc_setAssociatedObject(value, &LVRemoteConfigMarkerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(value, &_g6, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         static BOOL logged;
         if (!logged) {
             logged = YES;
-            LVLog([NSString stringWithFormat:@"rc mark class=%@ key=%@", NSStringFromClass([value class]), key]);
+            _e7([NSString stringWithFormat:@"rc mark class=%@ key=%@", NSStringFromClass([value class]), key]);
         }
     } @catch (__unused NSException *e) { }
 }
-static void LVRemoteConfigForceClass(id value);
+static void _b4(id value);
 
-// Replace a getter only on the class that implements it (owned methods), like LVInstallOne.
-static void LVRemoteConfigInstallGetter(Class cls, SEL selector, BOOL ownedOnly) {
+// Replace a getter only on the class that implements it (owned methods), like _d3.
+static void _b5(Class cls, SEL selector, BOOL ownedOnly) {
     Method method = NULL;
     if (ownedOnly) {
-        if (!LVOwnsSelector(cls, selector, &method)) return;
+        if (!_d2(cls, selector, &method)) return;
     } else {
         method = class_getInstanceMethod(cls, selector);
         if (!method) return;
     }
     NSString *key = [NSString stringWithFormat:@"%p:%s", cls, sel_getName(selector)];
-    if ([LVInstalled containsObject:key]) return;
+    if ([_g1 containsObject:key]) return;
     IMP original = method_getImplementation(method);
     IMP replacement = NULL;
     if (sel_isEqual(selector, @selector(boolValue))) {
         replacement = imp_implementationWithBlock(^BOOL(id value) {
-            if (LVRemoteConfigMarked(value)) return YES;
+            if (_b2(value)) return YES;
             return ((BOOL (*)(id, SEL))original)(value, selector);
         });
     } else if (sel_isEqual(selector, @selector(stringValue))) {
         replacement = imp_implementationWithBlock(^NSString *(id value) {
-            if (LVRemoteConfigMarked(value)) return @"1";
+            if (_b2(value)) return @"1";
             return ((NSString *(*)(id, SEL))original)(value, selector);
         });
     } else if (sel_isEqual(selector, @selector(numberValue))) {
         replacement = imp_implementationWithBlock(^NSNumber *(id value) {
-            if (LVRemoteConfigMarked(value)) return @1;
+            if (_b2(value)) return @1;
             return ((NSNumber *(*)(id, SEL))original)(value, selector);
         });
     }
     if (!replacement) return;
     class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
-    [LVInstalled addObject:key];
+    [_g1 addObject:key];
 }
-static void LVRemoteConfigForceClass(id value) {
+static void _b4(id value) {
     if (!value) return;
     Class cls = [value class];
-    if (!cls || cls == LVRemoteConfigValueClass) return;
-    LVRemoteConfigInstallGetter(cls, @selector(boolValue), NO);
-    LVRemoteConfigInstallGetter(cls, @selector(stringValue), NO);
-    LVRemoteConfigInstallGetter(cls, @selector(numberValue), NO);
+    if (!cls || cls == _g14) return;
+    _b5(cls, @selector(boolValue), NO);
+    _b5(cls, @selector(stringValue), NO);
+    _b5(cls, @selector(numberValue), NO);
 }
-static void LVRemoteConfigInstallConfigHook(Class cls) {
+static void _b6(Class cls) {
     SEL selectors[] = {@selector(configValueForKey:), @selector(configValueForKey:source:),
                        @selector(objectForKeyedSubscript:)};
     for (unsigned i = 0; i < sizeof(selectors) / sizeof(selectors[0]); i++) {
@@ -1053,16 +1034,16 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
         Method method = class_getInstanceMethod(cls, selector); // source: variant is optional
         if (!method) continue;
         NSString *key = [NSString stringWithFormat:@"%p:%s", cls, sel_getName(selector)];
-        if ([LVInstalled containsObject:key]) continue;
+        if ([_g1 containsObject:key]) continue;
         IMP original = method_getImplementation(method);
         IMP replacement;
         if (i == 0 || i == 2) {
             replacement = imp_implementationWithBlock(^id(id config, id name) {
                 id value = ((id (*)(id, SEL, id))original)(config, selector, name);
                 @try {
-                    if (value && LVRemoteConfigWantedKey(name)) {
-                        LVRemoteConfigForceClass(value);
-                        LVRemoteConfigMarkAny(value, name);
+                    if (value && _b1(name)) {
+                        _b4(value);
+                        _b3(value, name);
                     }
                 } @catch (__unused NSException *e) { }
                 return value; // the SAME instance the original returned
@@ -1071,19 +1052,19 @@ static void LVRemoteConfigInstallConfigHook(Class cls) {
             replacement = imp_implementationWithBlock(^id(id config, NSString *name, NSInteger source) {
                 id value = ((id (*)(id, SEL, NSString *, NSInteger))original)(config, selector, name, source);
                 @try {
-                    if (value && LVRemoteConfigWantedKey(name)) {
-                        LVRemoteConfigForceClass(value);
-                        LVRemoteConfigMarkAny(value, name);
+                    if (value && _b1(name)) {
+                        _b4(value);
+                        _b3(value, name);
                     }
                 } @catch (__unused NSException *e) { }
                 return value;
             });
         }
         class_replaceMethod(cls, selector, replacement, method_getTypeEncoding(method));
-        [LVInstalled addObject:key];
+        [_g1 addObject:key];
     }
 }
-static id LVForcedConfigValue(void) {
+static id _b7(void) {
     Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
     if (!valueClass) return nil;
     SEL initSel = @selector(initWithData:source:);
@@ -1093,14 +1074,14 @@ static id LVForcedConfigValue(void) {
     // LocketFull6 passes source 0, not 1.
     return ((id (*)(id, SEL, id, NSInteger))objc_msgSend)(value, initSel, one, 0);
 }
-static void LVInstallRemoteConfigOverrides(void) {
+static void _a1(void) {
     static BOOL installed;
     if (installed) return;
     @try {
         Class rc = NSClassFromString(@"FIRRemoteConfig");
         Class valueClass = NSClassFromString(@"FIRRemoteConfigValue");
         if (!rc || !valueClass) {
-            LVLog(@"rc class absent");
+            _e7(@"rc class absent");
             return;
         }
         // Same mechanism as LocketFull6 on 2.69: replace the returned value object
@@ -1114,11 +1095,11 @@ static void LVInstallRemoteConfigOverrides(void) {
             if (!method) continue;
             IMP original = method_getImplementation(method);
             IMP replacement = imp_implementationWithBlock(^id(id config, id name) {
-                if (LVRemoteConfigWantedKey(name)) {
-                    LVLog([NSString stringWithFormat:@"rc force %@ recv=%@", name, NSStringFromClass([config class])]);
+                if (_b1(name)) {
+                    _e7([NSString stringWithFormat:@"rc force %@ recv=%@", name, NSStringFromClass([config class])]);
                     // Dictionary receivers (2.71.2 config snapshot) need a plain value.
                     if ([config isKindOfClass:NSDictionary.class]) return @YES;
-                    id forced = LVForcedConfigValue();
+                    id forced = _b7();
                     if (forced) return forced;
                 }
                 return ((id (*)(id, SEL, id))original)(config, selector, name);
@@ -1129,18 +1110,18 @@ static void LVInstallRemoteConfigOverrides(void) {
         // Dictionary subscript hooking was removed: replacing methods on __NSDictionaryI
         // affects every dictionary in the process and crashed the app.
         installed = YES;
-        LVLog([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
+        _e7([NSString stringWithFormat:@"rc hooked %lu", (unsigned long)hooked]);
     } @catch (__unused NSException *e) {
-        LVLog(@"rc install exception");
+        _e7(@"rc install exception");
     }
 }
-static void LVInstallCameraGates(void) {
+static void _a3(void) {
     static BOOL done;
     if (done) return;
     Class recorder = NSClassFromString(@"Camera.Recorder") ?: NSClassFromString(@"_TtC6Camera8Recorder");
     Class camera = NSClassFromString(@"Camera.CameraViewController") ?: NSClassFromString(@"_TtC6Camera20CameraViewController");
     if (!recorder && !camera) {
-        LVLog(@"camera classes absent");
+        _e7(@"camera classes absent");
         return;
     }
     done = YES;
@@ -1154,11 +1135,11 @@ static void LVInstallCameraGates(void) {
                 @"cameraRollVideoUploadEnabled", @"_cameraRollVideoUploadEnabled",
                 @"longerVideosEnabled", @"_longerVideosEnabled"]) {
                 @try { [obj setValue:@YES forKey:key];
-                    LVLog([NSString stringWithFormat:@"set %@ on %@", key, NSStringFromClass([obj class])]);
+                    _e7([NSString stringWithFormat:@"set %@ on %@", key, NSStringFromClass([obj class])]);
                 } @catch (__unused NSException *e) { }
             }
         } @catch (NSException *e) {
-            LVLog([NSString stringWithFormat:@"camera kvc %@ %@", NSStringFromClass([obj class]), e.reason]);
+            _e7([NSString stringWithFormat:@"camera kvc %@ %@", NSStringFromClass([obj class]), e.reason]);
         }
     };
     if (recorder) {
@@ -1173,32 +1154,32 @@ static void LVInstallCameraGates(void) {
             if (nm) [names appendFormat:@" %s", nm];
         }
         free(ivars);
-        LVLog([NSString stringWithFormat:@"recorder ivars%@", names]);
+        _e7([NSString stringWithFormat:@"recorder ivars%@", names]);
     }
 }
-static void LVInstallMicButton(void) {
+static void _a4(void) {
 }
 __attribute__((constructor)) static void LV17Load(void) {
     @autoreleasepool {
         // Only the authorized Locket main executable, never extensions or unrelated apps.
         NSString *executable = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleExecutable"];
         if (![executable isEqualToString:@"Locket"]) return;
-        LVEnabled = YES;
-        LVLogQueue = dispatch_queue_create("local.locket.video17.log", DISPATCH_QUEUE_SERIAL);
-        LVInstalled = [NSMutableSet set];
-        LVInstallClasses();
-        LVInstallUploaderChunkHook();
-        LVInstallRemoteConfigOverrides();
-        LVInstallPostHook();
-        LVInstallTokenHook();
-        LVInstallAppCheckHook();
-        LVInstallCameraGates();
-        LVInstallMicButton();
+        _g10 = YES;
+        _g11 = dispatch_queue_create("local.locket.video17.log", DISPATCH_QUEUE_SERIAL);
+        _g1 = [NSMutableSet set];
+        _d1();
+        _a2();
+        _a1();
+        _a5();
+        _a6();
+        _a7();
+        _a3();
+        _a4();
         dispatch_async(dispatch_get_main_queue(), ^{
-            LVInstallClasses();
-            LVInstallUploaderChunkHook();
-            LVInstallRemoteConfigOverrides();
-            LVInstallCameraGates();
+            _d1();
+            _a2();
+            _a1();
+            _a3();
         });
     }
 }
