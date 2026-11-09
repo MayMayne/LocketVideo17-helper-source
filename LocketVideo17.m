@@ -218,7 +218,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     BOOL compatible = iso && ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] ||
                               [ext isEqualToString:@"m4v"]);
     if (!compatible) LVLog(@"copy no: container mismatch");
-    if (compatible && size > 5600000) { LVLog(@"copy no: over 5.6MB cap"); return NO; }
+    if (compatible && size > 6000000) { LVLog(@"copy no: over 6MB"); return NO; }
     if (compatible && source) *source = url;
     return compatible;
 }
@@ -248,12 +248,14 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            // Server rules now cap uploads at ~6 MB, so target 5.6 MB (decimal) to stay under.
-            static const int64_t kCap = 5600000;
+            // Server caps uploads at 6 MB. Only shrink when the file exceeds that, and aim
+            // for 5.9 MB — shrinking further would throw away quality for nothing.
+            static const int64_t kCap = 6000000;
+            static const int64_t kTarget = 5900000;
             double secs = CMTimeGetSeconds(_duration);
             BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
             NSInteger audioRate = audio ? 64000 : 0;
-            double budget = (double)kCap - fmax(200000.0, secs * 150.0);
+            double budget = (double)kTarget - fmax(200000.0, secs * 150.0);
             NSInteger base = (NSInteger)floor(budget * 8.0 / MAX(secs, 1.0)) - audioRate;
             if (base < 12000) base = 12000;
             for (NSUInteger attempt = 0; attempt < 4; attempt++) {
@@ -262,7 +264,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 // Keep HEVC: re-encoding QuickTime HEVC to H.264 nearly doubles the file.
                 BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:YES attempt:attempt error:&error];
                 int64_t got = LVSize(temp);
-                if (ok && got > 0 && got <= kCap && [self validate:temp error:&error]) {
+                if (ok && got > 0 && got <= kTarget && [self validate:temp error:&error]) {
                     LVLog([NSString stringWithFormat:@"under cap bytes=%lld", (long long)got]);
                     [self complete:temp error:nil]; return;
                 }
@@ -337,7 +339,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     // Quality-based encoding: a constant quality target spends bits only where the picture
     // needs them, instead of wasting a fixed bitrate on static scenes. HEVC at q=0.72 keeps
     // roughly the same visual quality at a third of the H.264 size.
-    double quality = 0.72;
+    // 0.72 produced an 886 KB file from a 4.2 MB source — visibly soft.
+    double quality = 0.92;
     NSDictionary *compression = @{
         AVVideoQualityKey:@(quality),
         AVVideoExpectedSourceFrameRateKey:@(fps),
