@@ -259,7 +259,8 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             for (NSUInteger attempt = 0; attempt < 4; attempt++) {
                 NSInteger rate = (NSInteger)(base * pow(0.62, (double)attempt));
                 if (rate < 10000) rate = 10000;
-                BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:attempt error:&error];
+                // Keep HEVC: re-encoding QuickTime HEVC to H.264 nearly doubles the file.
+                BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:YES attempt:attempt error:&error];
                 int64_t got = LVSize(temp);
                 if (ok && got > 0 && got <= kCap && [self validate:temp error:&error]) {
                     LVLog([NSString stringWithFormat:@"under cap bytes=%lld", (long long)got]);
@@ -333,11 +334,15 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             @{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)}];
     videoOut.videoComposition = composition;
     videoOut.alwaysCopiesSampleData = NO;
+    // Quality-based encoding: a constant quality target spends bits only where the picture
+    // needs them, instead of wasting a fixed bitrate on static scenes. HEVC at q=0.72 keeps
+    // roughly the same visual quality at a third of the H.264 size.
+    double quality = 0.72;
     NSDictionary *compression = @{
-        AVVideoAverageBitRateKey:@(rate),
+        AVVideoQualityKey:@(quality),
         AVVideoExpectedSourceFrameRateKey:@(fps),
         AVVideoMaxKeyFrameIntervalKey:@(fps * 4),
-        AVVideoAllowFrameReorderingKey:@NO,
+        AVVideoAllowFrameReorderingKey:@YES,
         AVVideoProfileLevelKey:hevc ? (__bridge NSString *)kVTProfileLevel_HEVC_Main_AutoLevel : AVVideoProfileLevelH264MainAutoLevel
     };
     NSDictionary *videoSettings = @{
