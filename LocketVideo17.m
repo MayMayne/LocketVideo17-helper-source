@@ -218,6 +218,7 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     BOOL compatible = iso && ([ext isEqualToString:@"mp4"] || [ext isEqualToString:@"mov"] ||
                               [ext isEqualToString:@"m4v"]);
     if (!compatible) LVLog(@"copy no: container mismatch");
+    if (compatible && size > 5600000) { LVLog(@"copy no: over 5.6MB cap"); return NO; }
     if (compatible && source) *source = url;
     return compatible;
 }
@@ -247,13 +248,26 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
-            // QuickTime/HEVC must become H.264 MP4, exactly like the working web uploader does.
-            NSInteger rate = LVSourceVideoRate(_asset);
+            // Server rules now cap uploads at ~6 MB, so target 5.6 MB (decimal) to stay under.
+            static const int64_t kCap = 5600000;
+            double secs = CMTimeGetSeconds(_duration);
             BOOL audio = [_asset tracksWithMediaType:AVMediaTypeAudio].count > 0;
-            NSInteger audioRate = audio ? 128000 : 0;
-            BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:0 error:&error];
-            if (ok && [self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
-            LVLog([NSString stringWithFormat:@"encode failed code=%ld", (long)error.code]);
+            NSInteger audioRate = audio ? 64000 : 0;
+            double budget = (double)kCap - fmax(200000.0, secs * 150.0);
+            NSInteger base = (NSInteger)floor(budget * 8.0 / MAX(secs, 1.0)) - audioRate;
+            if (base < 12000) base = 12000;
+            for (NSUInteger attempt = 0; attempt < 4; attempt++) {
+                NSInteger rate = (NSInteger)(base * pow(0.62, (double)attempt));
+                if (rate < 10000) rate = 10000;
+                BOOL ok = [self encode:temp videoRate:rate audioRate:audioRate hevc:NO attempt:attempt error:&error];
+                int64_t got = LVSize(temp);
+                if (ok && got > 0 && got <= kCap && [self validate:temp error:&error]) {
+                    LVLog([NSString stringWithFormat:@"under cap bytes=%lld", (long long)got]);
+                    [self complete:temp error:nil]; return;
+                }
+                LVLog([NSString stringWithFormat:@"retry bytes=%lld code=%ld", (long long)got, (long)error.code]);
+                [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
+            }
         } @catch (__unused NSException *e) {
             [self complete:nil error:LVError(24, @"AVFoundation raised an exception while exporting.")];
         }
