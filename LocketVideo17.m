@@ -15,6 +15,7 @@
 
 // No networking, entitlements, UIKit, or upload hooks. iOS 15+, arm64.
 static char LVJobKey, LVInternalKey, LVRemoteConfigMarkerKey;
+static BOOL LVQuickTime;
 static __thread unsigned LVOriginalDepth;
 static dispatch_queue_t LVLogQueue;
 static NSMutableSet<NSString *> *LVInstalled;
@@ -206,9 +207,10 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     const uint8_t *b = head.bytes;
     if (memcmp(b + 4, "ftyp", 4) != 0) { LVLog(@"copy no: no ftyp"); return NO; }
     BOOL qt = memcmp(b + 8, "qt  ", 4) == 0;
-    // The working uploader converts QuickTime ("ftypqt  ") to H.264 MP4 before upload;
-    // Storage rejects QuickTime in the video bucket. Only copy real ISO MP4.
-    if (qt) { LVLog(@"copy no: quicktime needs H264"); return NO; }
+    // QuickTime and MP4 are the same ISO container with a different ftyp brand. Storage
+    // rejects "qt  ", so copy the bytes untouched and rewrite the brand to mp42 — the
+    // samples are not touched, so quality and size are preserved exactly.
+    LVQuickTime = qt;
     NSString *ext = url.pathExtension.lowercaseString;
     // MP4 and MOV share the ISO base media container; copying .mov bytes into a .mp4 target is
     // valid and avoids a re-encode that tripled the file size.
@@ -245,6 +247,18 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
                 }
                 LVLog([NSString stringWithFormat:@"copied src=%lld dst=%lld",
                        (long long)srcBytes, (long long)LVSize(temp)]);
+                if (LVQuickTime) {
+                    // Rewrite only the ftyp brand: "qt  " -> "mp42". Sample data is untouched.
+                    @try {
+                        NSFileHandle *fh = [NSFileHandle fileHandleForUpdatingURL:temp error:NULL];
+                        if (fh) {
+                            [fh seekToFileOffset:8];
+                            [fh writeData:[@"mp42" dataUsingEncoding:NSASCIIStringEncoding]];
+                            [fh closeFile];
+                            LVLog(@"ftyp qt -> mp42");
+                        }
+                    } @catch (__unused NSException *e) { LVLog(@"ftyp rewrite failed"); }
+                }
                 if ([self validate:temp error:&error]) { [self complete:temp error:nil]; return; }
                 [NSFileManager.defaultManager removeItemAtURL:temp error:NULL];
             }
@@ -336,13 +350,11 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
             @{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)}];
     videoOut.videoComposition = composition;
     videoOut.alwaysCopiesSampleData = NO;
-    // Quality-based encoding: a constant quality target spends bits only where the picture
-    // needs them, instead of wasting a fixed bitrate on static scenes. HEVC at q=0.72 keeps
-    // roughly the same visual quality at a third of the H.264 size.
-    // 0.72 produced an 886 KB file from a 4.2 MB source — visibly soft.
-    double quality = 0.92;
+    // AVVideoQualityKey is ignored by the HEVC encoder (it fell back to default bitrate and
+    // never reached the target), so drive the size with an explicit average bitrate.
+    // HEVC keeps the same visual quality at roughly half the H.264 bitrate.
     NSDictionary *compression = @{
-        AVVideoQualityKey:@(quality),
+        AVVideoAverageBitRateKey:@(rate),
         AVVideoExpectedSourceFrameRateKey:@(fps),
         AVVideoMaxKeyFrameIntervalKey:@(fps * 4),
         AVVideoAllowFrameReorderingKey:@YES,
