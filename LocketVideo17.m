@@ -194,9 +194,9 @@ static NSString *LVOutputType(AVAssetExportSession *s) {
     // the app attached a passthrough videoComposition. Re-encoding a 4 MB clip produced 9 MB.
     if (![_asset isKindOfClass:AVURLAsset.class]) return NO;
     NSURL *url = ((AVURLAsset *)_asset).URL;
-    LVLog([NSString stringWithFormat:@"copy? src=%@ ext=%@ out=%@ type=%@ file=%@",
+    LVLog([NSString stringWithFormat:@"copy? src=%@ ext=%@ out=%@ type=%@ file=%@ bytes=%lld",
            url.path.lastPathComponent, url.pathExtension, _outputURL.pathExtension,
-           _fileType, url.isFileURL ? @"y" : @"n"]);
+           _fileType, url.isFileURL ? @"y" : @"n", (long long)LVSize(url)]);
     if (!url.isFileURL || [url isEqual:_outputURL]) return NO;
     int64_t size = LVSize(url);
     if (size <= 0) { LVLog(@"copy no: size"); return NO; }
